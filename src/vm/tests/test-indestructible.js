@@ -593,3 +593,69 @@ test('delete totally_indestructible VM', function (t) {
         t.end();
     }
 });
+
+/*
+ * Regression for #1167: VM.delete must reject a zone whose delegated dataset
+ * has an @indestructible hold even when vmobj.indestructible_delegated is not
+ * set in the cached vmobj. We exercise the active ZFS check by installing the
+ * snapshot+hold by hand (without going through VM.update), so the cached
+ * indestructible_delegated flag stays false.
+ */
+
+test('create delegated VM (for stale-cache check)', function (t) {
+    createTestVM(t, 'delegated', function (err) {
+        t.end();
+    });
+});
+
+test('install @indestructible hold by hand', function (t) {
+    if (current_vm_aborted) {
+        t.ok(false, 'current VM aborted, skipping');
+        t.end();
+        return;
+    }
+    var snap = vm_vmobj.zfs_filesystem + '/data@indestructible';
+    async.series([
+        function (cb) { zfs(['snapshot', snap], log, cb); },
+        function (cb) { zfs(['hold', 'do_not_destroy', snap], log, cb); }
+    ], function (err) {
+        t.ok(!err, 'installed @indestructible hold: '
+            + (err ? err.message : 'success'));
+        t.end();
+    });
+});
+
+test('VM.delete rejects when only the on-disk hold is present', function (t) {
+    if (current_vm_aborted) {
+        t.ok(false, 'current VM aborted, skipping');
+        t.end();
+        return;
+    }
+    VM.delete(vm_uuid, function (err) {
+        t.ok(err && /indestructible_delegated is set/.test(err.message),
+            'delete rejected: ' + (err ? err.message : 'succeeded'));
+        t.end();
+    });
+});
+
+test('release hand-installed hold and delete VM', function (t) {
+    var snap = vm_vmobj.zfs_filesystem + '/data@indestructible';
+    async.series([
+        function (cb) {
+            zfs(['release', 'do_not_destroy', snap], log, function (e) {
+                cb();
+            });
+        },
+        function (cb) {
+            zfs(['destroy', snap], log, function (e) { cb(); });
+        },
+        function (cb) {
+            VM.delete(vm_uuid, function (err) {
+                t.ok(!err, 'delete VM: ' + (err ? err.message : 'success'));
+                cb();
+            });
+        }
+    ], function () {
+        t.end();
+    });
+});
