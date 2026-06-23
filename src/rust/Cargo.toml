@@ -1,0 +1,27 @@
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+
+# Self-contained Rust workspace for the SmartOS platform image. The goal
+# is to replace every Node.js tool in the PI with a native illumos binary
+# built here. Crates are added per phase; deps are vendored under vendor/
+# so the platform build is hermetic (no network at build time).
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/hello",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MPL-2.0"
+
+# Release binaries ship in the PI; abort keeps them small and avoids
+# unwinding through the C/illumos boundary. Tests still build with the
+# default unwind harness (cargo forces unwind for the test profile).
+[profile.release]
+panic = "abort"
+strip = true
