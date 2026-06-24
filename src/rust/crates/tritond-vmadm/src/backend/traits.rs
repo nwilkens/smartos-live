@@ -121,6 +121,12 @@ pub trait ZoneHost: Send + Sync {
     /// Whether a snapshot exists (`zfs get -Ho value name <snapshot>`).
     async fn zfs_snapshot_exists(&self, snapshot: &str) -> Result<bool>;
 
+    /// Whether a dataset (filesystem/volume) exists
+    /// (`zfs get -Ho value name <dataset>`, exit 0 == present). The
+    /// reprovision data-preservation dance uses this to decide whether the
+    /// zone has a delegated `/data` dataset to rename out of the way.
+    async fn zfs_dataset_exists(&self, dataset: &str) -> Result<bool>;
+
     /// `zfs snapshot <snapshot>` (the `@final`-missing fallback).
     async fn zfs_snapshot(&self, snapshot: &str) -> Result<()>;
 
@@ -172,7 +178,7 @@ pub trait ZoneHost: Send + Sync {
 
     // ---- rollback / teardown primitives (tolerant of already-gone) ----
 
-    /// `zfs destroy -rf <dataset>`; treats "does not exist" as success.
+    /// `zfs destroy -rF <dataset>`; treats "does not exist" as success.
     async fn zfs_destroy_recursive(&self, dataset: &str) -> Result<()>;
 
     /// `zoneadm -u <uuid> uninstall -F`; tolerant of already-uninstalled.
@@ -189,8 +195,8 @@ pub trait ZoneHost: Send + Sync {
     /// Every configured vmadm-managed zone uuid (`zoneadm list -cp`).
     async fn list_zone_uuids(&self) -> Result<Vec<Uuid>>;
 
-    /// `zoneadm -u <uuid> halt` (forced power-off). Tolerant of an
-    /// already-halted zone.
+    /// `zoneadm -u <uuid> halt -X` (forced power-off, bypassing brand
+    /// statechange hooks). Tolerant of an already-halted zone.
     async fn zoneadm_halt(&self, uuid: Uuid) -> Result<()>;
 
     /// `zoneadm -u <uuid> reboot`.
@@ -221,6 +227,50 @@ pub trait ZoneHost: Send + Sync {
     /// `zfs list -Hpt snapshot -o name,used,creation -r <dataset>` — the
     /// zoneroot's snapshots (node filters to the `vmsnap-` prefix).
     async fn zfs_list_snapshots(&self, dataset: &str) -> Result<Vec<SnapshotInfo>>;
+
+    // ---- holds / reprovision data-preservation / image-uuid edit ----
+
+    /// `zfs holds -H <snapshot>` parsed into `(snapshot, tag)` pairs.
+    /// Mirrors node `VM.js` `_listIndestructibleHolds` (lines 8093-8135):
+    /// a missing snapshot ("does not exist" / "could not find") yields an
+    /// empty list, not an error, so a destructibility check on a never-held
+    /// dataset is a no-op.
+    async fn zfs_holds(&self, snapshot: &str) -> Result<Vec<(String, String)>>;
+
+    /// `zfs rename -f <from> <to>`. The reprovision flow renames the
+    /// delegated dataset and zoneroot out of the way and back (node `VM.js`
+    /// lines 11761/11799/12119).
+    async fn zfs_rename(&self, from: &str, to: &str) -> Result<()>;
+
+    /// `zfs set <prop>=<value> <dataset>` (single property). The reprovision
+    /// flow toggles `zoned=off`/`zoned=on` on the delegated dataset (node
+    /// `VM.js` lines 11713/12142).
+    async fn zfs_set_prop(&self, dataset: &str, prop: &str, value: &str) -> Result<()>;
+
+    /// `zonecfg -u <uuid> -f -` with `select attr name=<name>; set
+    /// value="<value>"; end`. Updates the zone's `dataset-uuid` (node calls
+    /// the attr `dataset-uuid` though the property is `image_uuid`, see
+    /// `VM.js` lines 9710-9714, 12159-12160).
+    async fn zonecfg_set_attr(&self, uuid: Uuid, name: &str, value: &str) -> Result<()>;
+
+    /// `zonecfg -u <uuid> -f -` with `remove attr name=<name>`. The teardown
+    /// counterpart to [`ZoneHost::zonecfg_set_attr`].
+    async fn zonecfg_remove_attr(&self, uuid: Uuid, name: &str) -> Result<()>;
+
+    /// `zonecfg -u <uuid> -f -` with `remove dataset name=<dataset>`.
+    /// The reprovision JM path removes the delegated `dataset` resource
+    /// before `zoneadm install`, because the install verify fails when the
+    /// `dataset` named in the config has been parked out of the way (node
+    /// `VM.js` does the equivalent rename dance around the re-install).
+    /// Tolerant of an already-absent resource.
+    async fn zonecfg_remove_dataset(&self, uuid: Uuid, dataset: &str) -> Result<()>;
+
+    /// `zonecfg -u <uuid> -f -` with `add dataset; set name=<dataset>; end`.
+    /// Re-adds the delegated `dataset` resource after the re-install and the
+    /// `/data` restore (the counterpart to
+    /// [`ZoneHost::zonecfg_remove_dataset`]). Idempotent: re-adding an
+    /// already-present dataset resource is tolerated.
+    async fn zonecfg_add_dataset(&self, uuid: Uuid, dataset: &str) -> Result<()>;
 }
 
 /// Registers a NIC's host link as a SmartOS nic_tag so the zone brand's

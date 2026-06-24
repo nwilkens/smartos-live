@@ -62,7 +62,11 @@ fn string_meta(map: &JsonMap, key: &str) -> Option<String> {
     }
 }
 
-/// node `metaDataConfig`: `instance-id` + `local-hostname`.
+/// node `metaDataConfig`: `instance-id` + `local-hostname`. The hostname
+/// is operator-controlled (it can be `alias`, which the agent forwards
+/// verbatim), so it is emitted as a quoted-and-escaped YAML scalar rather
+/// than string-interpolated raw — otherwise a crafted alias could inject
+/// extra YAML keys into the seed (M5). `instance-id` is always a uuid.
 fn default_meta_data(spec: &VmCreateSpec) -> String {
     let hostname = spec
         .hostname
@@ -70,9 +74,33 @@ fn default_meta_data(spec: &VmCreateSpec) -> String {
         .or_else(|| spec.alias.clone())
         .unwrap_or_else(|| spec.uuid.to_string());
     format!(
-        "# cloud-init meta-data\ninstance-id: {}\nlocal-hostname: {hostname}\n",
-        spec.uuid
+        "# cloud-init meta-data\ninstance-id: {}\nlocal-hostname: {}\n",
+        spec.uuid,
+        yaml_quote(&hostname)
     )
+}
+
+/// Emit a value as a double-quoted YAML scalar, escaping the characters a
+/// YAML 1.1 double-quoted scalar requires. This makes interpolation of
+/// arbitrary text injection-safe (a `"` or newline cannot terminate the
+/// scalar and start a new mapping key).
+fn yaml_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]
@@ -113,8 +141,19 @@ mod tests {
         assert_eq!(files.user_data, "#cloud-config\n{}\n");
         assert_eq!(
             files.meta_data,
-            "# cloud-init meta-data\ninstance-id: 11111111-1111-1111-1111-111111111111\nlocal-hostname: web0\n"
+            "# cloud-init meta-data\ninstance-id: 11111111-1111-1111-1111-111111111111\nlocal-hostname: \"web0\"\n"
         );
         assert!(files.network_config.is_none());
+    }
+
+    #[test]
+    fn yaml_quote_escapes_injection() {
+        // A double-quoted YAML scalar must survive embedded quotes/newlines
+        // so a crafted alias cannot inject a new mapping key.
+        assert_eq!(yaml_quote("web0"), "\"web0\"");
+        assert_eq!(
+            yaml_quote("x\"\nruncmd: [touch, /pwned]"),
+            "\"x\\\"\\nruncmd: [touch, /pwned]\""
+        );
     }
 }

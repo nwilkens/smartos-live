@@ -132,7 +132,7 @@ add attr; set name=\"vm-version\"; set type=string; set value=\"1\"; end
 add attr; set name=\"create-timestamp\"; set type=string; set value=\"1970-01-01T00:00:00.000Z\"; end
 add attr; set name=transition; set value=\"provisioning:running:300000\"; set type=string; end
 set cpu-shares=100
-set limitpriv=\"default\"
+set limitpriv=\"default,-file_link_any,-net_access,-proc_fork,-proc_info,-proc_session\"
 set max-lwps=2000
 set max-msg-ids=4096
 set max-sem-ids=4096

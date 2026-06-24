@@ -38,7 +38,7 @@ pub enum VmadmError {
     #[error("a disk model is required for bhyve disks")]
     DiskModelRequired,
 
-    #[error("VM {0} is indestructible; refusing to delete")]
+    #[error("VM {0} is indestructible (a held @indestructible snapshot exists); refusing destructive operation")]
     Indestructible(Uuid),
 
     #[error("nic_tag {link:?} is not registered and the {brand} brand will not boot without it")]

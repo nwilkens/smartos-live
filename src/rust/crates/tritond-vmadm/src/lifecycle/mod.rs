@@ -10,6 +10,7 @@
 pub mod control;
 pub mod create;
 pub mod get;
+pub mod holds;
 pub mod reprovision;
 pub mod update;
 

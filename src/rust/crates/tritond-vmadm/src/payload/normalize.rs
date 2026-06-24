@@ -30,6 +30,22 @@ pub fn normalize(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<VmCreateSpec, VmadmError> {
     let brand = Brand::parse(&payload.brand)?;
+    // L10/L11: node honors these on create but this engine does not yet
+    // port them. Fail closed rather than silently dropping the behaviour.
+    if payload.archive_on_delete == Some(true) {
+        return Err(VmadmError::Payload(
+            "archive_on_delete is not yet supported by this vmadm".to_string(),
+        ));
+    }
+    if payload
+        .internal_metadata_namespaces
+        .as_ref()
+        .is_some_and(|n| !n.is_empty())
+    {
+        return Err(VmadmError::Payload(
+            "internal_metadata_namespaces are not yet supported by this vmadm".to_string(),
+        ));
+    }
     let uuid = payload.uuid.unwrap_or_else(Uuid::new_v4);
 
     // Compute memory while `payload` is still fully owned (derive_memory
@@ -69,6 +85,27 @@ pub fn normalize(
         Vec::new()
     };
 
+    // bhyve images are applied to the boot disk (disk0), NOT the zoneroot:
+    // node treats a bhyve image as a zvol cloned into disk0, never as a
+    // zoneroot install template. A top-level `image_uuid` passed as the
+    // `zoneadm install -t` template makes the brand try to clone it as the
+    // zoneroot dataset and fails ("'devices' does not apply to datasets of
+    // this type"). So for bhyve, push a top-level image_uuid down onto a
+    // boot disk that lacks one, and drop it from the top level so it never
+    // reaches the OS-zone install template.
+    let mut top_image_uuid = payload.image_uuid;
+    if brand.is_hvm()
+        && let Some(img) = top_image_uuid
+    {
+        let boot = disks.iter_mut().find(|d| d.boot);
+        if let Some(boot) = boot
+            && boot.image_uuid.is_none()
+        {
+            boot.image_uuid = Some(img);
+        }
+        top_image_uuid = None;
+    }
+
     let customer_metadata = payload.customer_metadata.unwrap_or_default();
     let mut internal_metadata = payload.internal_metadata.unwrap_or_default();
     let nocloud = detect_nocloud(&customer_metadata, &internal_metadata);
@@ -99,7 +136,7 @@ pub fn normalize(
         zpool,
         zfs_filesystem,
         zonepath,
-        image_uuid: payload.image_uuid,
+        image_uuid: top_image_uuid,
         create_timestamp: now,
         vm_version: 1,
         autoboot: payload.autoboot.unwrap_or(true),
@@ -126,8 +163,11 @@ pub fn normalize(
         max_shm_memory_mib: payload.max_shm_memory.unwrap_or(mem.physical),
         flexible_disk_size_mib,
         bootrom: payload.bootrom,
+        // vnc_port/boot are bhyve HVM attrs; OS zones never carry them.
+        vnc_port: if brand.is_hvm() { payload.vnc_port } else { None },
+        boot: if brand.is_hvm() { payload.boot } else { None },
 
-        limit_priv: parse_limit_priv(payload.limit_priv.as_ref()),
+        limit_priv: parse_limit_priv(brand, payload.limit_priv.as_ref()),
         dns_domain: payload
             .dns_domain
             .unwrap_or_else(|| k::DEFAULT_DNS_DOMAIN.to_string()),
@@ -166,18 +206,26 @@ struct Memory {
     swap: u64,
 }
 
-/// `fixPayloadMemory` (`VM.js:4620`). For bhyve, `max_physical_memory`
-/// derives from `ram + BHYVE_MEM_OVERHEAD` and `max_locked` follows it.
-/// For OS zones the values are taken from the payload (the agent supplies
-/// them) and only defaulted when absent. `max_swap` is clamped to be at
-/// least `max_physical_memory`.
+/// `fixPayloadMemory` (`VM.js:4620`). bhyve adds `default_memory_overhead`
+/// to `ram` for `max_physical_memory` only when the payload omits an
+/// explicit `max_physical_memory` (VM.js:4636); an explicit value is
+/// honored verbatim. `max_locked`/`max_swap` cascade off the honored
+/// physical value and are only defaulted when absent. On the auto path
+/// `max_swap` is bumped to at least `MINIMUM_MAX_SWAP` (VM.js:4687); an
+/// explicit `max_swap` is honored as-is.
 fn derive_memory(brand: Brand, p: &VmadmCreatePayload, ram_mib: u64) -> Memory {
-    let physical = match brand {
-        Brand::Bhyve => ram_mib + brand.features().default_memory_overhead_mib,
-        Brand::JoyentMinimal => p.max_physical_memory.unwrap_or(k::DEFAULT_RAM_MIB),
+    let physical = match p.max_physical_memory {
+        Some(mpm) => mpm,
+        None => match brand {
+            Brand::Bhyve => ram_mib + brand.features().default_memory_overhead_mib,
+            Brand::JoyentMinimal => k::DEFAULT_RAM_MIB,
+        },
     };
     let locked = p.max_locked_memory.unwrap_or(physical);
-    let swap = p.max_swap.unwrap_or(physical).max(physical);
+    let swap = match p.max_swap {
+        Some(s) => s,
+        None => physical.max(k::MINIMUM_MAX_SWAP_MIB),
+    };
     Memory {
         physical,
         locked,
@@ -185,17 +233,22 @@ fn derive_memory(brand: Brand, p: &VmadmCreatePayload, ram_mib: u64) -> Memory {
     }
 }
 
-/// `limit_priv` may arrive as a comma-separated string or an array; the
-/// default is `["default"]` for both supported brands (neither sets
-/// `features.limit_priv`).
-fn parse_limit_priv(v: Option<&Value>) -> Vec<String> {
+/// `limit_priv` may arrive as a comma-separated string or an array. When
+/// omitted, applyZoneDefaults stamps the brand's `features.limit_priv`
+/// (bhyve locks the guest down; OS brands get `["default"]`) (VM.js:4932).
+fn parse_limit_priv(brand: Brand, v: Option<&Value>) -> Vec<String> {
     match v {
         Some(Value::String(s)) => s.split(',').map(|t| t.trim().to_string()).collect(),
         Some(Value::Array(a)) => a
             .iter()
             .filter_map(|x| x.as_str().map(str::to_string))
             .collect(),
-        _ => vec!["default".to_string()],
+        _ => brand
+            .features()
+            .limit_priv
+            .iter()
+            .map(|p| (*p).to_string())
+            .collect(),
     }
 }
 
@@ -449,9 +502,16 @@ fn normalize_disk(
     };
     let zfs_filesystem = format!("{zpool}/{vm_uuid}/disk{idx}");
     let raw_path = format!("/dev/zvol/rdsk/{zfs_filesystem}");
+    // refreservation arrives in MiB; reject an overflow rather than wrap to
+    // a tiny byte count that would silently under-reserve the zvol.
     let refreservation = match d.refreservation {
         Some(0) => Refreservation::None,
-        Some(n) => Refreservation::Bytes(n * 1024 * 1024),
+        Some(n) => {
+            let bytes = n.checked_mul(1024 * 1024).ok_or_else(|| {
+                VmadmError::Payload(format!("disk refreservation {n} MiB overflows"))
+            })?;
+            Refreservation::Bytes(bytes)
+        }
         None => Refreservation::Auto,
     };
     Ok(DiskSpec {
@@ -521,17 +581,72 @@ fn reject_zonecfg_ident(field: &str, value: &str) -> Result<(), VmadmError> {
     Ok(())
 }
 
+/// L8: a create `nic_tag` must match node's `^[a-zA-Z0-9_/]+$` (VM.js:5557).
+/// '/' is allowed for dataplane (`proteus[N]`) link names; '.'/'-'/':' are
+/// rejected even though the generic ident validator would permit them.
+fn reject_nic_tag(tag: &str) -> Result<(), VmadmError> {
+    let ok = !tag.is_empty()
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/'));
+    if !ok {
+        return Err(VmadmError::Payload(format!(
+            "nic_tag {tag:?} is not valid (^[a-zA-Z0-9_/]+$)"
+        )));
+    }
+    Ok(())
+}
+
+/// L5: the zfs `compression` algorithms node accepts on a disk.
+fn reject_compression(value: &str) -> Result<(), VmadmError> {
+    const ALLOWED: &[&str] = &[
+        "on", "off", "gzip", "gzip-1", "gzip-2", "gzip-3", "gzip-4", "gzip-5", "gzip-6", "gzip-7",
+        "gzip-8", "gzip-9", "lz4", "lzjb", "zle",
+    ];
+    if !ALLOWED.contains(&value) {
+        return Err(VmadmError::Payload(format!(
+            "disk compression {value:?} is not a supported zfs algorithm"
+        )));
+    }
+    Ok(())
+}
+
 /// Validate every free-form spec field that reaches the zonecfg blob or a
 /// zfs dataset name. Typed fields (uuids, ips, numbers, the brand/disk
 /// model enums) are already safe; `alias` is base64-encoded.
 fn validate_spec(spec: &VmCreateSpec) -> Result<(), VmadmError> {
     reject_zonecfg_ident("zpool", &spec.zpool)?;
+    // L7: max-shm-memory is emitted to zonecfg in bytes (MiB * 1 MiB).
+    // Reject a value that would overflow u64 rather than wrap to a tiny
+    // limit when build.rs does the multiply.
+    if spec
+        .max_shm_memory_mib
+        .checked_mul(1024 * 1024)
+        .is_none()
+    {
+        return Err(VmadmError::Payload(format!(
+            "max_shm_memory {} MiB overflows when converted to bytes",
+            spec.max_shm_memory_mib
+        )));
+    }
     if let Some(hostname) = &spec.hostname {
         reject_zonecfg_text("hostname", hostname)?;
     }
     reject_zonecfg_text("dns_domain", &spec.dns_domain)?;
+    // L9: each resolver must parse as an IpAddr (node validates the same way
+    // it validates gateways); reject otherwise rather than emit garbage.
     for r in &spec.resolvers {
         reject_zonecfg_text("resolver", r)?;
+        if r.parse::<IpAddr>().is_err() {
+            return Err(VmadmError::Payload(format!(
+                "resolver {r:?} is not a valid IP address"
+            )));
+        }
+    }
+    // M5: alias reaches the NoCloud meta-data seed as well as the (base64)
+    // zonecfg attr; block characters that could break out of either stream.
+    if let Some(alias) = &spec.alias {
+        reject_zonecfg_text("alias", alias)?;
     }
     if let Some(opts) = &spec.bhyve_extra_opts {
         reject_zonecfg_text("bhyve_extra_opts", opts)?;
@@ -542,13 +657,20 @@ fn validate_spec(spec: &VmCreateSpec) -> Result<(), VmadmError> {
     if let Some(bootrom) = &spec.bootrom {
         reject_zonecfg_text("bootrom", bootrom)?;
     }
+    // boot order reaches the quoted HVM attr stream.
+    if let Some(boot) = &spec.boot {
+        reject_zonecfg_text("boot", boot)?;
+    }
     for lp in &spec.limit_priv {
         reject_zonecfg_ident("limit_priv", lp)?;
     }
     for nic in &spec.nics {
         reject_zonecfg_ident("interface", &nic.interface)?;
+        // L8: create requires a nic_tag matching node's create regex
+        // ^[a-zA-Z0-9_/]+$ (VM.js:5557) — allows '/' for dataplane links,
+        // disallows the '.'/'-'/':'  the generic ident validator permits.
         if let Some(tag) = &nic.nic_tag {
-            reject_zonecfg_ident("nic_tag", tag)?;
+            reject_nic_tag(tag)?;
         }
         if let Some(model) = &nic.model {
             reject_zonecfg_ident("nic model", model)?;
@@ -556,9 +678,24 @@ fn validate_spec(spec: &VmCreateSpec) -> Result<(), VmadmError> {
     }
     // Disk fields that reach the zonecfg device block (pci-slot is
     // payload-supplied; model is a parsed enum so it is already safe).
+    let quota_bytes = spec.quota_gib.saturating_mul(1024 * 1024 * 1024);
     for disk in &spec.disks {
         if let Some(slot) = &disk.pci_slot {
             reject_zonecfg_ident("pci_slot", slot)?;
+        }
+        // L5: validate the zfs compression algorithm so an unknown value is
+        // rejected here rather than failing later at `zfs create`.
+        if let Some(comp) = &disk.compression {
+            reject_compression(comp)?;
+        }
+        // H3: a refreservation larger than the zone quota can never be
+        // satisfied; reject at normalize instead of failing at zfs.
+        if let crate::model::disk::Refreservation::Bytes(b) = disk.refreservation
+            && b > quota_bytes
+        {
+            return Err(VmadmError::Payload(format!(
+                "disk refreservation {b} bytes exceeds quota {quota_bytes} bytes"
+            )));
         }
     }
     // indestructible_* are accepted by node to refuse destroying a
@@ -807,5 +944,250 @@ mod tests {
             "internal_metadata": { "cloudinit_datasource": "nocloud" }
         }));
         assert!(spec.nocloud);
+    }
+
+    #[test]
+    fn bhyve_default_limit_priv_locks_down() {
+        // H1: an omitted limit_priv stamps the brand lockdown list.
+        let spec = parse(serde_json::json!({"brand": "bhyve", "ram": 512}));
+        assert_eq!(
+            spec.limit_priv,
+            vec![
+                "default".to_string(),
+                "-file_link_any".to_string(),
+                "-net_access".to_string(),
+                "-proc_fork".to_string(),
+                "-proc_info".to_string(),
+                "-proc_session".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_limit_priv_overrides_brand_default() {
+        let spec = parse(serde_json::json!({
+            "brand": "bhyve", "ram": 512, "limit_priv": "default,-net_access"
+        }));
+        assert_eq!(
+            spec.limit_priv,
+            vec!["default".to_string(), "-net_access".to_string()]
+        );
+    }
+
+    #[test]
+    fn bhyve_honors_explicit_max_physical_memory() {
+        // M3: an explicit max_physical_memory is used verbatim (not
+        // ram+overhead) and locked/swap cascade off it.
+        let spec = parse(serde_json::json!({
+            "brand": "bhyve", "ram": 2048, "max_physical_memory": 4096
+        }));
+        assert_eq!(spec.max_physical_memory_mib, 4096);
+        assert_eq!(spec.max_locked_memory_mib, 4096);
+        assert_eq!(spec.max_swap_mib, 4096);
+    }
+
+    #[test]
+    fn auto_swap_bumped_to_minimum() {
+        // L6: with tiny physical the auto swap floors at MINIMUM_MAX_SWAP.
+        let spec = parse(serde_json::json!({
+            "brand": "joyent-minimal", "max_physical_memory": 64
+        }));
+        assert_eq!(spec.max_swap_mib, k::MINIMUM_MAX_SWAP_MIB);
+    }
+
+    #[test]
+    fn explicit_swap_honored_below_minimum() {
+        // An explicit max_swap is honored as-is (node only floors the auto
+        // path); we must not clamp it up.
+        let spec = parse(serde_json::json!({
+            "brand": "joyent-minimal", "max_physical_memory": 1024, "max_swap": 128
+        }));
+        assert_eq!(spec.max_swap_mib, 128);
+    }
+
+    #[test]
+    fn refreservation_overflow_rejected() {
+        // L7: a refreservation in MiB that overflows when scaled to bytes.
+        let err = try_parse(serde_json::json!({
+            "brand": "bhyve", "ram": 512,
+            "disks": [{ "boot": true, "model": "virtio", "size": 1024,
+                "image_uuid": "22222222-2222-2222-2222-222222222222",
+                "refreservation": u64::MAX }]
+        }))
+        .unwrap_err();
+        assert!(matches!(err, VmadmError::Payload(_)));
+    }
+
+    #[test]
+    fn refreservation_exceeding_quota_rejected() {
+        // H3: refreservation larger than the zone quota can never hold.
+        let err = try_parse(serde_json::json!({
+            "brand": "bhyve", "ram": 512, "quota": 1,
+            "disks": [{ "boot": true, "model": "virtio", "size": 10240,
+                "image_uuid": "22222222-2222-2222-2222-222222222222",
+                "refreservation": 10240 }]
+        }))
+        .unwrap_err();
+        assert!(matches!(err, VmadmError::Payload(_)));
+    }
+
+    #[test]
+    fn valid_compression_accepted_unknown_rejected() {
+        // L5
+        assert!(
+            try_parse(serde_json::json!({
+                "brand": "bhyve", "ram": 512,
+                "disks": [{ "boot": true, "model": "virtio", "size": 1024,
+                    "image_uuid": "22222222-2222-2222-2222-222222222222",
+                    "compression": "gzip-9" }]
+            }))
+            .is_ok()
+        );
+        assert!(
+            try_parse(serde_json::json!({
+                "brand": "bhyve", "ram": 512,
+                "disks": [{ "boot": true, "model": "virtio", "size": 1024,
+                    "image_uuid": "22222222-2222-2222-2222-222222222222",
+                    "compression": "zstd-fast-1000" }]
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn nic_tag_allows_slash_rejects_dot_dash_colon() {
+        // L8: dataplane proteus[N] and admin/external tags are valid; the
+        // ':'/'.'/'-' the generic ident permits are not valid for create.
+        assert!(
+            try_parse(serde_json::json!({
+                "brand": "joyent-minimal",
+                "nics": [{ "nic_tag": "sdc_underlay/4", "ips": ["10.0.0.5/24"] }]
+            }))
+            .is_ok()
+        );
+        for bad in ["a.b", "a-b", "a:b"] {
+            assert!(
+                try_parse(serde_json::json!({
+                    "brand": "joyent-minimal",
+                    "nics": [{ "nic_tag": bad, "ips": ["10.0.0.5/24"] }]
+                }))
+                .is_err(),
+                "nic_tag {bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn resolver_must_be_ip() {
+        // L9
+        let err = try_parse(serde_json::json!({
+            "brand": "joyent-minimal", "resolvers": ["not-an-ip"]
+        }))
+        .unwrap_err();
+        assert!(matches!(err, VmadmError::Payload(_)));
+        assert!(
+            try_parse(serde_json::json!({
+                "brand": "joyent-minimal", "resolvers": ["8.8.8.8", "2001:4860:4860::8888"]
+            }))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_archive_on_delete_and_imd_namespaces() {
+        // L10/L11
+        assert!(matches!(
+            try_parse(serde_json::json!({
+                "brand": "joyent-minimal", "archive_on_delete": true
+            })),
+            Err(VmadmError::Payload(_))
+        ));
+        assert!(matches!(
+            try_parse(serde_json::json!({
+                "brand": "joyent-minimal", "internal_metadata_namespaces": ["ns"]
+            })),
+            Err(VmadmError::Payload(_))
+        ));
+    }
+
+    #[test]
+    fn vnc_port_and_boot_carried_for_bhyve_only() {
+        // M4
+        let bhyve = parse(serde_json::json!({
+            "brand": "bhyve", "ram": 512, "vnc_port": 5900, "boot": "order=cd"
+        }));
+        assert_eq!(bhyve.vnc_port, Some(5900));
+        assert_eq!(bhyve.boot.as_deref(), Some("order=cd"));
+        // OS zones never carry HVM attrs even if the payload sets them.
+        let jm = parse(serde_json::json!({
+            "brand": "joyent-minimal", "vnc_port": 5900, "boot": "order=cd"
+        }));
+        assert_eq!(jm.vnc_port, None);
+        assert_eq!(jm.boot, None);
+    }
+
+    #[test]
+    fn bhyve_top_level_image_uuid_pushed_to_boot_disk() {
+        // A top-level image_uuid on a bhyve payload must land on disk0, not
+        // become the zoneroot install template (which fails with "'devices'
+        // does not apply to datasets of this type").
+        let spec = parse(serde_json::json!({
+            "uuid": "11111111-1111-1111-1111-111111111111",
+            "brand": "bhyve", "ram": 1024,
+            "image_uuid": "22222222-2222-2222-2222-222222222222",
+            "disks": [{ "boot": true, "model": "virtio", "size": 10240 }]
+        }));
+        // Not passed as the OS-zone install template.
+        assert_eq!(spec.image_uuid, None);
+        // Applied to the boot disk instead.
+        let boot = spec.disks.iter().find(|d| d.boot).expect("boot disk");
+        assert_eq!(
+            boot.image_uuid,
+            Some("22222222-2222-2222-2222-222222222222".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn bhyve_disk_image_uuid_not_overridden_by_top_level() {
+        // A boot disk that already names its own image keeps it; the
+        // top-level image_uuid is still dropped from the install template.
+        let spec = parse(serde_json::json!({
+            "uuid": "11111111-1111-1111-1111-111111111111",
+            "brand": "bhyve", "ram": 1024,
+            "image_uuid": "22222222-2222-2222-2222-222222222222",
+            "disks": [{ "boot": true, "model": "virtio", "size": 10240,
+                        "image_uuid": "33333333-3333-3333-3333-333333333333" }]
+        }));
+        assert_eq!(spec.image_uuid, None);
+        let boot = spec.disks.iter().find(|d| d.boot).expect("boot disk");
+        assert_eq!(
+            boot.image_uuid,
+            Some("33333333-3333-3333-3333-333333333333".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn os_zone_top_level_image_uuid_kept_as_template() {
+        // For joyent-minimal the top-level image_uuid IS the zoneroot
+        // install template and must be preserved.
+        let spec = parse(serde_json::json!({
+            "brand": "joyent-minimal",
+            "image_uuid": "22222222-2222-2222-2222-222222222222"
+        }));
+        assert_eq!(
+            spec.image_uuid,
+            Some("22222222-2222-2222-2222-222222222222".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn rejects_alias_injection() {
+        // M5: alias reaches the NoCloud seed; block metacharacters.
+        let err = try_parse(serde_json::json!({
+            "brand": "bhyve", "ram": 512,
+            "alias": "x\"\nruncmd: [touch, /pwned]"
+        }))
+        .unwrap_err();
+        assert!(matches!(err, VmadmError::Payload(_)));
     }
 }

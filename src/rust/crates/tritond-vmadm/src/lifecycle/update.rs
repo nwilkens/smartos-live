@@ -6,13 +6,17 @@
 
 //! The in-place update verbs. Currently a single one: grow the boot disk.
 //!
-//! This is the native equivalent of the agent's two-step `vmadm update`
-//! dance (`tritonagent::vmadm::grow_boot_disk`): first enlarge the
-//! `flexible-disk-size` budget so the zoneroot quota can hold the bigger
-//! zvol, then grow the boot zvol's `volsize`, then re-run the RFD-0148
-//! quota so the zoneroot `quota`/`reservation`/`refreservation` track the
-//! new total. We drive the host primitives directly rather than shelling
-//! to node `vmadm`, so the whole flow is unit-testable against `FakeHost`.
+//! This is the native equivalent of the agent's `vmadm update` dance
+//! (`tritonagent::vmadm::grow_boot_disk`). Ordering matters: we raise the
+//! zoneroot `quota`/`reservation`/`refquota` to cover the new total FIRST,
+//! so the boot zvol's `volsize` grow cannot fail out-of-space (node raises
+//! the parent quota before the volume change, VM.js:15945). Then enlarge
+//! the `flexible-disk-size` budget, grow the `volsize`, and finally settle
+//! the RFD-0148 quota so the zoneroot tracks the new total exactly. A
+//! failure after the pre-bump restores the prior flex-attr and zoneroot
+//! space settings (node `resetQuotaOnError`, VM.js:15976). We drive the
+//! host primitives directly rather than shelling to node `vmadm`, so the
+//! whole flow is unit-testable against `FakeHost`.
 
 use uuid::Uuid;
 
@@ -25,11 +29,14 @@ const GIB: u64 = 1024 * 1024 * 1024;
 /// Grow the boot disk of bhyve zone `uuid` to `new_size_bytes`.
 ///
 /// Grow-only and idempotent: a target at or below the current `volsize` is
-/// a no-op (info-logged). The growth path bumps the zonecfg
-/// `flexible-disk-size` attr to cover the new total, sets the boot zvol's
-/// `volsize`, then re-applies the RFD-0148 zoneroot quota (the same
-/// `refquota` -> per-volume `refreservation=auto` readback ->
-/// `quota`/`reservation`/`refreservation` sequence that create runs).
+/// a no-op (info-logged). The growth path first raises the zoneroot
+/// quota/reservation/refquota to cover the new total (so the zvol grow
+/// cannot run out of space), then bumps the zonecfg `flexible-disk-size`
+/// attr, sets the boot zvol's `volsize`, and finally re-applies the
+/// RFD-0148 zoneroot quota (the same `refquota` -> per-volume
+/// `refreservation=auto` readback -> `quota`/`reservation`/`refreservation`
+/// sequence that create runs). A failure after the pre-bump restores the
+/// prior flex-attr and zoneroot space settings.
 ///
 /// The running guest does NOT see the new capacity until it reboots —
 /// bhyve reads the block-device size at boot, and cloud-init grows the
@@ -81,11 +88,122 @@ pub async fn grow_boot_disk_in<H: ZoneHost>(
         .filter(|(name, _)| name != &boot_ds)
         .map(|(_, sz)| *sz)
         .sum();
+    let new_total_bytes = new_size_bytes.saturating_add(other_bytes);
     let new_total_mib = (new_mib).saturating_add(other_bytes / MIB);
     let current_flex_mib = flexible_disk_size_mib(&export);
     let new_flex_mib = new_total_mib.max(current_flex_mib.unwrap_or(0));
 
-    // Step 1: enlarge the flexible-disk-size budget (only if it grows).
+    // Capture the prior zoneroot space settings so we can restore them if a
+    // later step fails (node `resetQuotaOnError`, VM.js:15904). `quota`/
+    // `reservation`/`refquota` are bytes (or absent -> "none"/unset).
+    let prior = host
+        .zfs_get_props(&zoneroot, &["quota", "reservation", "refquota"])
+        .await?;
+    let prior_quota = prior.get("quota").cloned();
+    let prior_reservation = prior.get("reservation").cloned();
+    let prior_refquota = prior.get("refquota").cloned();
+
+    // The requested-quota GiB, reconstructed from the existing refquota (as
+    // `apply_bhyve_quota` does). Used to size the pre-bump headroom.
+    let quota_gib = prior_refquota
+        .as_deref()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|b| b / GIB)
+        .unwrap_or(crate::constants::DEFAULT_BHYVE_QUOTA_GIB);
+    let max_quota = quota_gib.max(crate::constants::DEFAULT_BHYVE_QUOTA_GIB) * GIB;
+    // A generous pre-bump that is certain to hold the grown zvol: the new
+    // total volume bytes plus the quota headroom. `apply_bhyve_quota` will
+    // tighten this to the exact RFD-0148 value afterward.
+    let prebump = new_total_bytes.saturating_add(max_quota);
+
+    // Step 1 (FIRST) and Steps 2-4 (the growth proper) are wrapped together
+    // so ANY failure — including a partially-applied pre-bump — restores the
+    // prior flex-attr and zoneroot space settings. The pre-bump is a single
+    // `zfs set` of several props; zfs applies them left to right, so an
+    // absurd target can set `refquota`/`quota` and then fail on `reservation`
+    // ("size is greater than available space"), leaving the zoneroot's quota
+    // inflated. Rolling back here keeps a failed grow side-effect-free.
+    let grow = grow_with_prebump(
+        host,
+        uuid,
+        &zoneroot,
+        &boot_ds,
+        new_mib,
+        new_flex_mib,
+        current_flex_mib,
+        prebump,
+    )
+    .await;
+    if let Err(e) = grow {
+        restore_on_error(
+            host,
+            uuid,
+            &zoneroot,
+            current_flex_mib,
+            prior_quota.as_deref(),
+            prior_reservation.as_deref(),
+            prior_refquota.as_deref(),
+        )
+        .await;
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// The full mutating sequence: the zoneroot quota pre-bump (Step 1) plus
+/// Steps 2-4. Pulled into one fallible unit so the caller's single rollback
+/// covers a partially-applied pre-bump too.
+#[allow(clippy::too_many_arguments)]
+async fn grow_with_prebump<H: ZoneHost>(
+    host: &H,
+    uuid: Uuid,
+    zoneroot: &str,
+    boot_ds: &str,
+    new_mib: u64,
+    new_flex_mib: u64,
+    current_flex_mib: Option<u64>,
+    prebump: u64,
+) -> Result<()> {
+    // Step 1 (FIRST): raise the zoneroot quota/reservation/refquota to cover
+    // the new total BEFORE growing the zvol, so the volsize bump cannot fail
+    // out-of-space (node raises quota before the volume change, VM.js:15945).
+    host.zfs_set(
+        zoneroot,
+        &[
+            ("refreservation".to_string(), "none".to_string()),
+            ("refquota".to_string(), prebump.to_string()),
+            ("quota".to_string(), prebump.to_string()),
+            ("reservation".to_string(), prebump.to_string()),
+        ],
+    )
+    .await?;
+
+    grow_after_prebump(
+        host,
+        uuid,
+        zoneroot,
+        boot_ds,
+        new_mib,
+        new_flex_mib,
+        current_flex_mib,
+    )
+    .await
+}
+
+/// Steps 2-4 of the grow, run after the zoneroot quota pre-bump: enlarge the
+/// flexible-disk-size budget, grow the boot zvol's `volsize`, then settle
+/// the RFD-0148 zoneroot quota.
+#[allow(clippy::too_many_arguments)]
+async fn grow_after_prebump<H: ZoneHost>(
+    host: &H,
+    uuid: Uuid,
+    zoneroot: &str,
+    boot_ds: &str,
+    new_mib: u64,
+    new_flex_mib: u64,
+    current_flex_mib: Option<u64>,
+) -> Result<()> {
+    // Step 2: enlarge the flexible-disk-size budget (only if it grows).
     if Some(new_flex_mib) != current_flex_mib {
         host.zonecfg(
             crate::backend::traits::ZoneRef::Uuid(uuid),
@@ -94,16 +212,53 @@ pub async fn grow_boot_disk_in<H: ZoneHost>(
         .await?;
     }
 
-    // Step 2: grow the boot zvol. ZFS volsize only ever grows here (the
-    // guard above rejected a shrink), so this is safe.
-    host.zfs_set(&boot_ds, &[("volsize".to_string(), format!("{new_mib}M"))])
+    // Step 3: grow the boot zvol. The zoneroot now has room (Step 1) and the
+    // grow-only guard rejected a shrink, so this is safe.
+    host.zfs_set(boot_ds, &[("volsize".to_string(), format!("{new_mib}M"))])
         .await?;
 
-    // Step 3: re-run the RFD-0148 quota so the zoneroot tracks the bigger
-    // disk. We reconstruct the `quota` GiB input from the zoneroot's
-    // current `refquota` (create set it to `max(quota,DEFAULT)*GiB`); see
-    // the summary note on the missing direct read.
-    apply_bhyve_quota(host, &zoneroot, new_flex_mib).await
+    // Step 4: settle the RFD-0148 quota so the zoneroot tracks the bigger
+    // disk exactly (tightening the coarse pre-bump from Step 1).
+    apply_bhyve_quota(host, zoneroot, new_flex_mib).await
+}
+
+/// Best-effort restoration of the zoneroot space settings and the
+/// flexible-disk-size attr after a failed grow (node `resetQuotaOnError`,
+/// VM.js:15976). Errors here are swallowed: the original failure is what the
+/// caller propagates.
+#[allow(clippy::too_many_arguments)]
+async fn restore_on_error<H: ZoneHost>(
+    host: &H,
+    uuid: Uuid,
+    zoneroot: &str,
+    prior_flex_mib: Option<u64>,
+    prior_quota: Option<&str>,
+    prior_reservation: Option<&str>,
+    prior_refquota: Option<&str>,
+) {
+    // Restore the flexible-disk-size attr to its prior value if we changed it.
+    if let Some(flex) = prior_flex_mib {
+        let _ = host
+            .zonecfg(
+                crate::backend::traits::ZoneRef::Uuid(uuid),
+                &format!("select attr name=flexible-disk-size; set value=\"{flex}\"; end\n"),
+            )
+            .await;
+    }
+    // Restore quota/reservation/refquota. An absent prior value maps back to
+    // "none" (zfs's unset sentinel for these properties).
+    let props = vec![
+        ("quota".to_string(), prior_quota.unwrap_or("none").to_string()),
+        (
+            "reservation".to_string(),
+            prior_reservation.unwrap_or("none").to_string(),
+        ),
+        (
+            "refquota".to_string(),
+            prior_refquota.unwrap_or("none").to_string(),
+        ),
+    ];
+    let _ = host.zfs_set(zoneroot, &props).await;
 }
 
 /// Re-apply the RFD-0148 zoneroot quota after a disk grow. This mirrors
@@ -205,11 +360,24 @@ fn is_boot_property(line: &str) -> bool {
 }
 
 /// Strip the `/dev/zvol/{rdsk,dsk}/` prefix from a device `match` to get
-/// the bare ZFS dataset name.
+/// the bare ZFS dataset name. `zonecfg export` renders the value quoted
+/// (`set match="/dev/zvol/rdsk/zones/<uuid>/disk0"`), so unquote first —
+/// mirrors `get.rs::unquote` for scalar `set` values; without this the
+/// leading `"` defeated the prefix match and every grow reported "has no
+/// boot disk to resize".
 fn raw_zvol_to_dataset(m: &str) -> Option<String> {
+    let m = unquote(m.trim());
     m.strip_prefix("/dev/zvol/rdsk/")
         .or_else(|| m.strip_prefix("/dev/zvol/dsk/"))
         .map(|s| s.to_string())
+}
+
+/// Strip a single pair of surrounding double quotes (mirrors
+/// `get.rs::unquote`).
+fn unquote(s: &str) -> &str {
+    s.strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(s)
 }
 
 /// The zoneroot dataset is the boot zvol's parent (`zones/<uuid>/disk0` ->
@@ -379,7 +547,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn grow_bumps_flex_then_volsize_then_quota() {
+    async fn grow_prebumps_quota_then_flex_then_volsize_then_settles() {
         let host = FakeHost::new();
         // 20 GiB boot zvol, refquota 1 GiB; grow to 40 GiB.
         install_state(&host, 20 * GIB, GIB).await;
@@ -393,25 +561,40 @@ mod tests {
         let root = format!("zones/{u}");
         let boot_ds = format!("zones/{u}/disk0");
 
-        // Ordered: flex bump -> volsize set -> quota refquota/none ->
-        // per-volume auto -> final quota set.
+        // New order: zoneroot quota PRE-BUMP -> flex bump -> volsize set ->
+        // settle (refquota/none -> per-volume auto -> final quota set).
+        // The pre-bump raises quota+reservation+refquota together to cover
+        // the new total (40 GiB) before the volsize grow.
+        let i_prebump = ops
+            .iter()
+            .position(|o| {
+                o.starts_with("zfs set ")
+                    && o.contains("quota=")
+                    && o.contains("reservation=")
+                    && o.contains("refquota=")
+                    && o.ends_with(&root)
+            })
+            .expect("quota pre-bump");
         let i_flex = index_of(&ops, "select attr name=flexible-disk-size").expect("flex bump");
         let i_volsize =
             index_of(&ops, &format!("zfs set volsize=40960M {boot_ds}")).expect("volsize grow");
-        let i_refquota =
-            index_of(&ops, "zfs set refreservation=none refquota=").expect("quota step 1");
         let i_auto = index_of(&ops, &format!("zfs set refreservation=auto {boot_ds}"))
             .expect("per-volume auto");
         let i_final = ops
             .iter()
-            .position(|o| o.starts_with("zfs set quota=") && o.contains("reservation="))
+            .rposition(|o| o.starts_with("zfs set quota=") && o.contains("reservation="))
             .expect("final quota");
 
+        assert!(i_prebump < i_flex, "pre-bump before flex: {ops:?}");
         assert!(i_flex < i_volsize, "flex before volsize: {ops:?}");
-        assert!(i_volsize < i_refquota, "volsize before quota: {ops:?}");
+        assert!(i_volsize < i_auto, "volsize before settle: {ops:?}");
+        assert!(i_auto < i_final, "settle order: {ops:?}");
+
+        // The pre-bump must be large enough to hold the new 40 GiB total
+        // (40 GiB + 1 GiB headroom = 41 GiB).
         assert!(
-            i_refquota < i_auto && i_auto < i_final,
-            "quota order: {ops:?}"
+            ops.iter().any(|o| o.contains(&format!("quota={}", 41 * GIB)) && o.ends_with(&root)),
+            "pre-bump sized to new total + headroom: {ops:?}",
         );
 
         // The flex budget grew to cover the 40 GiB boot disk (40960 MiB);
@@ -426,6 +609,78 @@ mod tests {
             ops.iter()
                 .any(|o| o.contains(&format!("refquota={}", GIB)) && o.ends_with(&root)),
             "refquota reapplied: {ops:?}",
+        );
+    }
+
+    /// H2 rollback: a failure during the grow (here the volsize set) restores
+    /// the prior flex-attr and zoneroot space settings.
+    #[tokio::test]
+    async fn grow_failure_restores_prior_quota_and_flex() {
+        let host = FakeHost::new().failing_on("volsize=40960M");
+        install_state(&host, 20 * GIB, GIB).await;
+        // Seed prior quota/reservation so the rollback has values to restore.
+        let root = format!("zones/{}", uuid());
+        let mut props = BTreeMap::new();
+        props.insert("quota".to_string(), (2 * GIB).to_string());
+        props.insert("reservation".to_string(), (2 * GIB).to_string());
+        props.insert("refquota".to_string(), GIB.to_string());
+        host.set_zfs_props(root.clone(), props);
+
+        let err = grow_boot_disk_in(&host, uuid(), 40 * GIB)
+            .await
+            .expect_err("grow must fail");
+        assert!(matches!(err, VmadmError::Payload(_)), "{err:?}");
+
+        let ops = host.ops();
+        // The flex attr was restored to its prior value (20480).
+        assert!(
+            ops.iter().rev().any(|o| o.contains("set value=\"20480\"")),
+            "flex restored: {ops:?}"
+        );
+        // The zoneroot quota/reservation/refquota were restored to prior.
+        assert!(
+            ops.iter().rev().any(|o| o.contains(&format!("quota={}", 2 * GIB))
+                && o.contains(&format!("reservation={}", 2 * GIB))
+                && o.ends_with(&root)),
+            "quota/reservation restored: {ops:?}"
+        );
+    }
+
+    /// A failure DURING the Step-1 pre-bump (e.g. zfs rejects an absurd
+    /// reservation as "size is greater than available space") must also roll
+    /// back the zoneroot space settings — the pre-bump can partially apply
+    /// (refquota/quota set, reservation fails) and leave the quota inflated.
+    #[tokio::test]
+    async fn grow_prebump_failure_restores_prior_quota() {
+        // The 40 GiB target makes the pre-bump 41 GiB
+        // (40 GiB total + 1 GiB headroom); fail the pre-bump's reservation.
+        let prebump_reservation = format!("reservation={}", 41 * GIB);
+        let host = FakeHost::new().failing_on(&prebump_reservation);
+        install_state(&host, 20 * GIB, GIB).await;
+        let root = format!("zones/{}", uuid());
+        let mut props = BTreeMap::new();
+        props.insert("quota".to_string(), (2 * GIB).to_string());
+        props.insert("reservation".to_string(), (2 * GIB).to_string());
+        props.insert("refquota".to_string(), GIB.to_string());
+        host.set_zfs_props(root.clone(), props);
+
+        let err = grow_boot_disk_in(&host, uuid(), 40 * GIB)
+            .await
+            .expect_err("pre-bump must fail");
+        assert!(matches!(err, VmadmError::Payload(_)), "{err:?}");
+
+        let ops = host.ops();
+        // The volsize was never grown (Step 3 never ran).
+        assert!(
+            !ops.iter().any(|o| o.contains("volsize=40960M")),
+            "no volsize grow on pre-bump failure: {ops:?}"
+        );
+        // The zoneroot quota/reservation were restored to the prior values.
+        assert!(
+            ops.iter().rev().any(|o| o.contains(&format!("quota={}", 2 * GIB))
+                && o.contains(&format!("reservation={}", 2 * GIB))
+                && o.ends_with(&root)),
+            "quota/reservation restored after pre-bump failure: {ops:?}"
         );
     }
 
@@ -468,5 +723,33 @@ mod tests {
              end\n"
         );
         assert_eq!(boot_disk_dataset(&export), None);
+    }
+
+    /// The real `zonecfg export` quotes the `match` value
+    /// (`set match="..."`); the boot dataset must still parse out (the bug
+    /// that broke every grow with "has no boot disk to resize").
+    #[test]
+    fn parses_boot_dataset_from_quoted_match() {
+        let u = uuid();
+        let export = format!(
+            "add device\n\
+             set match=\"/dev/zvol/rdsk/zones/{u}/disk0\"\n\
+             add property (name=boot,value=\"true\")\n\
+             end\n"
+        );
+        assert_eq!(
+            boot_disk_dataset(&export).as_deref(),
+            Some(format!("zones/{u}/disk0").as_str())
+        );
+        // The unquote helper itself, directly.
+        assert_eq!(
+            raw_zvol_to_dataset("\"/dev/zvol/rdsk/zones/x/disk0\"").as_deref(),
+            Some("zones/x/disk0")
+        );
+        // An unquoted value still works (some platforms / forms).
+        assert_eq!(
+            raw_zvol_to_dataset("/dev/zvol/rdsk/zones/x/disk0").as_deref(),
+            Some("zones/x/disk0")
+        );
     }
 }

@@ -75,6 +75,12 @@ pub struct VmadmCreatePayload {
     pub bootrom: Option<String>,
     #[serde(default)]
     pub flexible_disk_size: Option<u64>, // MiB
+    /// HVM VNC TCP port (`vnc-port` attr). 0 = random, -1 = disabled.
+    #[serde(default)]
+    pub vnc_port: Option<i64>,
+    /// HVM boot order string passed to the brand (`boot` attr).
+    #[serde(default)]
+    pub boot: Option<String>,
 
     // networking / identity
     #[serde(default)]
@@ -116,6 +122,14 @@ pub struct VmadmCreatePayload {
     pub create_only: Option<bool>,
     #[serde(default)]
     pub nowait: Option<bool>,
+
+    // Accepted by node but not yet ported here. We keep the fields so a
+    // create that sets them is rejected (L10/L11) rather than silently
+    // dropping behaviour an operator may rely on.
+    #[serde(default)]
+    pub archive_on_delete: Option<bool>,
+    #[serde(default)]
+    pub internal_metadata_namespaces: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -37,6 +37,12 @@ pub struct FakeHost {
     zone_infos: Mutex<HashMap<Uuid, ZoneRuntime>>,
     exports: Mutex<HashMap<Uuid, String>>,
     zfs_props: Mutex<HashMap<String, BTreeMap<String, String>>>,
+    /// Preloaded `zfs holds` results keyed by snapshot -> [(snapshot, tag)].
+    holds: Mutex<HashMap<String, Vec<(String, String)>>>,
+    /// Datasets the fake reports as existing (`zfs_dataset_exists`). A
+    /// `zfs rename` updates this set so the reprovision rename-out / rename-
+    /// back journal can be exercised.
+    datasets: Mutex<HashSet<String>>,
 }
 
 impl FakeHost {
@@ -77,6 +83,41 @@ impl FakeHost {
     /// Set canned `zfs get` properties for a dataset.
     pub fn set_zfs_props(&self, dataset: impl Into<String>, props: BTreeMap<String, String>) {
         lock(&self.zfs_props).insert(dataset.into(), props);
+    }
+
+    /// Preload the `zfs holds` result for a snapshot. Each `tag` becomes a
+    /// `(snapshot, tag)` pair, matching the host's `-H` parse.
+    pub fn set_holds(&self, snapshot: impl Into<String>, tags: &[&str]) {
+        let snapshot = snapshot.into();
+        let pairs = tags
+            .iter()
+            .map(|t| (snapshot.clone(), (*t).to_string()))
+            .collect();
+        lock(&self.holds).insert(snapshot, pairs);
+    }
+
+    /// Mark a dataset as existing (`zfs_dataset_exists` returns true). Used
+    /// to seed a delegated `/data` dataset for the reprovision tests.
+    pub fn set_dataset_exists(&self, dataset: impl Into<String>) {
+        lock(&self.datasets).insert(dataset.into());
+    }
+
+    /// Transition a known zone's recorded state to halted (`installed`), so a
+    /// `stop`/`halt` is observable by a subsequent `zone_info` poll (the
+    /// reprovision wait-for-halted check). No-op for an unknown zone.
+    fn mark_halted(&self, uuid: Uuid) {
+        if let Some(info) = lock(&self.zone_infos).get_mut(&uuid) {
+            info.state = "installed".to_string();
+            info.zoneid = None;
+            info.zonedid = None;
+        }
+    }
+
+    /// Whether the fake currently believes `dataset` exists (after any
+    /// renames). Lets a test assert the data survived a reprovision.
+    #[must_use]
+    pub fn dataset_exists(&self, dataset: &str) -> bool {
+        lock(&self.datasets).contains(dataset)
     }
 
     /// The ordered op log.
@@ -163,6 +204,11 @@ impl ZoneHost for FakeHost {
         self.record(format!("zfs get name {snapshot}"))?;
         // Default: the canonical @final image snapshot exists.
         Ok(snapshot.ends_with("@final"))
+    }
+
+    async fn zfs_dataset_exists(&self, dataset: &str) -> Result<bool> {
+        self.record(format!("zfs get name {dataset}"))?;
+        Ok(lock(&self.datasets).contains(dataset))
     }
 
     async fn zfs_snapshot(&self, snapshot: &str) -> Result<()> {
@@ -253,7 +299,9 @@ impl ZoneHost for FakeHost {
     }
 
     async fn zoneadm_halt(&self, uuid: Uuid) -> Result<()> {
-        self.record(format!("zoneadm -u {uuid} halt"))
+        self.record(format!("zoneadm -u {uuid} halt"))?;
+        self.mark_halted(uuid);
+        Ok(())
     }
 
     async fn zoneadm_reboot(&self, uuid: Uuid) -> Result<()> {
@@ -261,7 +309,12 @@ impl ZoneHost for FakeHost {
     }
 
     async fn zlogin_shutdown(&self, uuid: Uuid, _timeout: Duration) -> Result<()> {
-        self.record(format!("zlogin {uuid} shutdown"))
+        self.record(format!("zlogin {uuid} shutdown"))?;
+        // A graceful in-guest shutdown reaches the halted state (the
+        // reprovision wait then converges immediately, as it does on a host
+        // where waitForZoneState sees `installed`).
+        self.mark_halted(uuid);
+        Ok(())
     }
 
     async fn zonecfg_export(&self, uuid: Uuid) -> Result<String> {
@@ -310,7 +363,7 @@ impl ZoneHost for FakeHost {
     }
 
     async fn zfs_destroy_recursive(&self, dataset: &str) -> Result<()> {
-        self.record(format!("zfs destroy -rf {dataset}"))
+        self.record(format!("zfs destroy -rF {dataset}"))
     }
 
     async fn zoneadm_uninstall_force(&self, uuid: Uuid) -> Result<()> {
@@ -320,6 +373,48 @@ impl ZoneHost for FakeHost {
 
     async fn zonecfg_delete_force(&self, uuid: Uuid) -> Result<()> {
         self.record(format!("zonecfg -u {uuid} delete -F"))
+    }
+
+    async fn zfs_holds(&self, snapshot: &str) -> Result<Vec<(String, String)>> {
+        self.record(format!("zfs holds -H {snapshot}"))?;
+        Ok(lock(&self.holds).get(snapshot).cloned().unwrap_or_default())
+    }
+
+    async fn zfs_rename(&self, from: &str, to: &str) -> Result<()> {
+        self.record(format!("zfs rename -f {from} {to}"))?;
+        // Move the dataset in the existence set so the data-preservation
+        // journal (rename out, rename back) can be asserted.
+        let mut ds = lock(&self.datasets);
+        if ds.remove(from) {
+            ds.insert(to.to_string());
+        }
+        Ok(())
+    }
+
+    async fn zfs_set_prop(&self, dataset: &str, prop: &str, value: &str) -> Result<()> {
+        self.record(format!("zfs set {prop}={value} {dataset}"))
+    }
+
+    async fn zonecfg_set_attr(&self, uuid: Uuid, name: &str, value: &str) -> Result<()> {
+        self.record(format!(
+            "zonecfg -u {uuid} :: select attr name={name}; set value=\"{value}\"; end"
+        ))
+    }
+
+    async fn zonecfg_remove_attr(&self, uuid: Uuid, name: &str) -> Result<()> {
+        self.record(format!("zonecfg -u {uuid} :: remove attr name={name}"))
+    }
+
+    async fn zonecfg_remove_dataset(&self, uuid: Uuid, dataset: &str) -> Result<()> {
+        self.record(format!(
+            "zonecfg -u {uuid} :: remove dataset name={dataset}"
+        ))
+    }
+
+    async fn zonecfg_add_dataset(&self, uuid: Uuid, dataset: &str) -> Result<()> {
+        self.record(format!(
+            "zonecfg -u {uuid} :: add dataset; set name={dataset}; end"
+        ))
     }
 }
 
@@ -360,5 +455,72 @@ impl NicTagRegistrar for FakeNicTags {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FakeHost;
+    use crate::backend::traits::ZoneHost;
+
+    fn uuid() -> uuid::Uuid {
+        "11111111-1111-1111-1111-111111111111"
+            .parse()
+            .expect("valid test uuid")
+    }
+
+    #[tokio::test]
+    async fn holds_preload_and_empty_default() {
+        let host = FakeHost::new();
+        // A snapshot with no preloaded holds reports none (mirrors the host
+        // tolerating a missing snapshot as an empty list).
+        let held = host
+            .zfs_holds("zones/a@indestructible")
+            .await
+            .expect("holds");
+        assert!(held.is_empty());
+
+        host.set_holds("zones/a@indestructible", &["do_not_destroy", "extra"]);
+        let held = host
+            .zfs_holds("zones/a@indestructible")
+            .await
+            .expect("holds");
+        assert_eq!(
+            held,
+            vec![
+                ("zones/a@indestructible".to_string(), "do_not_destroy".to_string()),
+                ("zones/a@indestructible".to_string(), "extra".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn reprovision_primitives_record_ops() {
+        let host = FakeHost::new();
+        host.zfs_set_prop("zones/u/data", "zoned", "off")
+            .await
+            .expect("set zoned");
+        host.zfs_rename("zones/u/data", "zones/u-reprovisioning-data")
+            .await
+            .expect("rename");
+        host.zonecfg_set_attr(uuid(), "dataset-uuid", "abcd")
+            .await
+            .expect("set attr");
+        host.zonecfg_remove_attr(uuid(), "dataset-uuid")
+            .await
+            .expect("remove attr");
+
+        let ops = host.ops();
+        assert!(ops.iter().any(|o| o == "zfs set zoned=off zones/u/data"));
+        assert!(
+            ops.iter()
+                .any(|o| o == "zfs rename -f zones/u/data zones/u-reprovisioning-data")
+        );
+        assert!(ops.iter().any(|o| o.contains("select attr name=dataset-uuid")
+            && o.contains("set value=\"abcd\"")));
+        assert!(
+            ops.iter()
+                .any(|o| o.ends_with("remove attr name=dataset-uuid"))
+        );
     }
 }

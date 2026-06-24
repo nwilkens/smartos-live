@@ -31,7 +31,7 @@ pub const JOURNAL_DIR: &str = "/var/run/vmadm";
 /// path's rollback (and by `recover` on a later agent start).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UndoAction {
-    /// `zfs destroy -rf <dataset>` (tolerate "does not exist").
+    /// `zfs destroy -rF <dataset>` (tolerate "does not exist").
     ZfsDestroyRecursive { dataset: String },
     /// `zoneadm -u <uuid> uninstall -F` (tolerate already-uninstalled).
     ZoneadmUninstallForce { uuid: Uuid },

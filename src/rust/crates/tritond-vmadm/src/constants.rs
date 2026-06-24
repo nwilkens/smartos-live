@@ -29,6 +29,10 @@ pub const DEFAULT_BHYVE_QUOTA_GIB: u64 = 1;
 /// OS zones use it as-is.
 pub const PROVISION_TIMEOUT_SECS: u64 = 300;
 
+/// Graceful-stop timeout in seconds (`VM.js` `STOP_TIMEOUT = 60`). Bounds
+/// the in-guest shutdown before a stop falls back to a halt.
+pub const STOP_TIMEOUT_SECS: u64 = 60;
+
 /// Default `mdata:execute` SMF start timeout written at create
 /// (`VM.js` default).
 pub const DEFAULT_MDATA_EXEC_TIMEOUT_SECS: u64 = 300;
@@ -50,6 +54,11 @@ pub const DEFAULT_MAX_SHM_IDS: u32 = 4096;
 
 /// Default guest RAM in MiB when unspecified (`VM.js`).
 pub const DEFAULT_RAM_MIB: u64 = 256;
+
+/// Minimum `max_swap` in MiB when the engine auto-defaults it
+/// (`VM.js:153 MINIMUM_MAX_SWAP`). Only enforced on the auto path; an
+/// explicit payload `max_swap` is honored as-is.
+pub const MINIMUM_MAX_SWAP_MIB: u64 = 256;
 
 /// Default DNS domain (`VM.js`).
 pub const DEFAULT_DNS_DOMAIN: &str = "local";

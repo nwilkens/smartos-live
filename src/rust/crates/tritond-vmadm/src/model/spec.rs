@@ -58,6 +58,10 @@ pub struct VmCreateSpec {
     pub max_shm_memory_mib: u64,
     pub flexible_disk_size_mib: Option<u64>,
     pub bootrom: Option<String>,
+    /// HVM `vnc-port` attr (0 = random, -1 = disabled). bhyve only.
+    pub vnc_port: Option<i64>,
+    /// HVM `boot` order attr. bhyve only.
+    pub boot: Option<String>,
 
     // identity / misc
     pub limit_priv: Vec<String>,

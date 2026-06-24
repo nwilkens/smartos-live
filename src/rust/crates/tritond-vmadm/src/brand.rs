@@ -65,6 +65,9 @@ impl Brand {
                 // (proptable.js use_tmpfs); HVM brands never get tmpfs.
                 use_tmpfs: true,
                 default_memory_overhead_mib: 0,
+                // joyent-minimal carries no features.limit_priv, so
+                // applyZoneDefaults falls back to ["default"] (VM.js:4932).
+                limit_priv: &["default"],
             },
             Brand::Bhyve => BrandFeatures {
                 var_svc_provisioning: false,
@@ -73,6 +76,17 @@ impl Brand {
                 use_vm_autoboot: false,
                 use_tmpfs: false,
                 default_memory_overhead_mib: crate::constants::BHYVE_MEM_OVERHEAD_MIB,
+                // proptable.js brand_options.bhyve.features.limit_priv:
+                // strips file_link_any/net_access/proc_* so a guest cannot
+                // reach the global zone (proptable.js:2370).
+                limit_priv: &[
+                    "default",
+                    "-file_link_any",
+                    "-net_access",
+                    "-proc_fork",
+                    "-proc_info",
+                    "-proc_session",
+                ],
             },
         }
     }
@@ -98,6 +112,10 @@ pub struct BrandFeatures {
     pub use_tmpfs: bool,
     /// MiB added to `ram` to derive `max_physical_memory`.
     pub default_memory_overhead_mib: u64,
+    /// Default `limit_priv` when the payload omits one. bhyve locks the
+    /// guest down (proptable.js:2370); OS brands fall back to `["default"]`
+    /// (VM.js:4932). A leading `-` strips a privilege from `default`.
+    pub limit_priv: &'static [&'static str],
 }
 
 #[cfg(test)]
@@ -125,5 +143,22 @@ mod tests {
     fn bhyve_is_hvm_jm_is_not() {
         assert!(Brand::Bhyve.is_hvm());
         assert!(!Brand::JoyentMinimal.is_hvm());
+    }
+
+    #[test]
+    fn bhyve_limit_priv_locks_down_guest() {
+        // proptable.js:2370: the six-element lockdown list verbatim.
+        assert_eq!(
+            Brand::Bhyve.features().limit_priv,
+            &[
+                "default",
+                "-file_link_any",
+                "-net_access",
+                "-proc_fork",
+                "-proc_info",
+                "-proc_session",
+            ]
+        );
+        assert_eq!(Brand::JoyentMinimal.features().limit_priv, &["default"]);
     }
 }

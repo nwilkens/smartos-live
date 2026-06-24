@@ -79,9 +79,11 @@ fn emit_global_props(z: &mut Zonecfg, spec: &VmCreateSpec) {
     z.set("max-msg-ids", &spec.max_msg_ids.to_string());
     z.set("max-sem-ids", &spec.max_sem_ids.to_string());
     z.set("max-shm-ids", &spec.max_shm_ids.to_string());
+    // bytes = MiB * 1 MiB; normalize rejects values that would overflow, so
+    // saturating_mul here is just belt-and-suspenders against a panic.
     z.set(
         "max-shm-memory",
-        &(spec.max_shm_memory_mib * 1024 * 1024).to_string(),
+        &spec.max_shm_memory_mib.saturating_mul(1024 * 1024).to_string(),
     );
     z.set("zfs-io-priority", &spec.zfs_io_priority.to_string());
 }
@@ -131,6 +133,15 @@ fn emit_attrs(z: &mut Zonecfg, spec: &VmCreateSpec) {
         z.attr("zlog-mode", "g--");
         z.attr("zlog-name", "platform.log");
         z.attr("vcpus", &spec.vcpus.to_string());
+        // buildZonecfgUpdate emits boot then vnc-port in the HVM attr block
+        // (VM.js:7009/7012); KVM-only attrs (cpu-type/vga/spice/virtio-*)
+        // are intentionally not ported.
+        if let Some(boot) = &spec.boot {
+            z.attr("boot", boot);
+        }
+        if let Some(vnc) = spec.vnc_port {
+            z.attr("vnc-port", &vnc.to_string());
+        }
         if let Some(flex) = spec.flexible_disk_size_mib {
             z.attr("flexible-disk-size", &flex.to_string());
         }
@@ -308,4 +319,55 @@ fn provision_timeout_ms(spec: &VmCreateSpec) -> i64 {
 /// `Date.toISOString()` (`2026-06-20T18:00:00.000Z`).
 fn iso8601(now: chrono::DateTime<chrono::Utc>) -> String {
     now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::payload::{VmadmCreatePayload, normalize};
+
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(0, 0).unwrap_or_default()
+    }
+
+    fn render(json: serde_json::Value) -> String {
+        let p = VmadmCreatePayload::from_json_slice(json.to_string().as_bytes())
+            .unwrap_or_else(|e| panic!("payload: {e}"));
+        let spec = normalize(p, now()).unwrap_or_else(|e| panic!("normalize: {e}"));
+        build_create_zonecfg(&spec, now())
+    }
+
+    #[test]
+    fn bhyve_limitpriv_lockdown_emitted() {
+        // H1: the quoted limitpriv carries the six-element bhyve lockdown.
+        let out = render(serde_json::json!({"brand": "bhyve", "ram": 512}));
+        assert!(out.contains(
+            "set limitpriv=\"default,-file_link_any,-net_access,-proc_fork,-proc_info,-proc_session\""
+        ));
+    }
+
+    #[test]
+    fn vnc_port_and_boot_attrs_emitted_for_bhyve() {
+        // M4: boot then vnc-port appear in the HVM attr block.
+        let out = render(serde_json::json!({
+            "brand": "bhyve", "ram": 512, "vnc_port": 5900, "boot": "order=cd"
+        }));
+        assert!(out.contains("set name=\"boot\"; set type=string; set value=\"order=cd\""));
+        assert!(out.contains("set name=\"vnc-port\"; set type=string; set value=\"5900\""));
+    }
+
+    #[test]
+    fn no_vnc_or_boot_attr_when_absent() {
+        let out = render(serde_json::json!({"brand": "bhyve", "ram": 512}));
+        assert!(!out.contains("name=\"vnc-port\""));
+        assert!(!out.contains("name=\"boot\""));
+    }
+
+    #[test]
+    fn max_shm_memory_emitted_in_bytes() {
+        let out = render(serde_json::json!({
+            "brand": "joyent-minimal", "max_physical_memory": 1, "max_shm_memory": 1
+        }));
+        assert!(out.contains("set max-shm-memory=1048576"));
+    }
 }

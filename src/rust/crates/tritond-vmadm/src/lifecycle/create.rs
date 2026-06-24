@@ -904,7 +904,7 @@ mod tests {
         let ops = host.ops();
         assert!(
             ops.iter()
-                .any(|o| o.contains("zfs destroy -rf zones/11111111-1111-1111-1111-111111111111")),
+                .any(|o| o.contains("zfs destroy -rF zones/11111111-1111-1111-1111-111111111111")),
             "{ops:?}"
         );
         assert!(index_of(&ops, "boot").is_none());

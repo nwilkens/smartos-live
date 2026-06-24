@@ -44,9 +44,28 @@ impl HostBackend {
     }
 }
 
+/// A non-zero exit is tolerated (treated as success) when the trimmed
+/// stderr matches one of a command's expected "already gone / already in
+/// this state" phrases. node anchors these with `trim(stderr).match(/...$/)`
+/// (e.g. `VM.js` line 17979 `/zone is already halted$/`), so we match the
+/// phrase at the END of the trimmed stderr OR at the end of any single
+/// trimmed line — never an unanchored substring that could also appear
+/// inside an unrelated failure message. Each command passes only its own
+/// phrases (command-scoped), so a broad fragment can't leak across calls.
+fn stderr_tolerated(stderr: &str, tolerate: &[&str]) -> bool {
+    if tolerate.is_empty() {
+        return false;
+    }
+    let trimmed = stderr.trim();
+    tolerate.iter().any(|t| {
+        trimmed.ends_with(t) || stderr.lines().any(|line| line.trim_end().ends_with(t))
+    })
+}
+
 /// Run a command, optionally feeding `stdin`, with extra environment.
-/// `tolerate` substrings on stderr turn a non-zero exit into success
-/// (idempotent teardown: "already gone" is fine).
+/// `tolerate` phrases that end a trimmed stderr line turn a non-zero exit
+/// into success (idempotent teardown: "already gone" is fine). See
+/// [`stderr_tolerated`] for the anchoring rules.
 async fn run(
     bin: &str,
     args: &[&str],
@@ -97,7 +116,7 @@ async fn run(
         return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    if tolerate.iter().any(|t| stderr.contains(t)) {
+    if stderr_tolerated(&stderr, tolerate) {
         return Ok(String::new());
     }
     Err(VmadmError::NonZeroExit {
@@ -172,6 +191,22 @@ impl ZoneHost for HostBackend {
     async fn zfs_snapshot_exists(&self, snapshot: &str) -> Result<bool> {
         let status = Command::new(ZFS)
             .args(["get", "-Ho", "value", "name", snapshot])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map_err(|e| VmadmError::Spawn {
+                bin: ZFS.to_string(),
+                source: e,
+            })?;
+        Ok(status.success())
+    }
+
+    async fn zfs_dataset_exists(&self, dataset: &str) -> Result<bool> {
+        // Same existence probe as `zfs_snapshot_exists`; a dataset and a
+        // snapshot are both resolvable by `zfs get name`.
+        let status = Command::new(ZFS)
+            .args(["get", "-Ho", "value", "name", dataset])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -340,12 +375,18 @@ impl ZoneHost for HostBackend {
     }
 
     async fn zoneadm_halt(&self, uuid: Uuid) -> Result<()> {
+        // `-X` forces the power-off, bypassing brand statechange hooks so a
+        // wedged hook can't hang stop/delete (node `VM.js` lines 12956/17976
+        // `zoneadm(['-u', uuid, 'halt', '-X'])`). Tolerate only node's
+        // already-halted phrase (`VM.js` line 17979 `/zone is already
+        // halted$/`); the old over-broad "is not in"/"not running" fragments
+        // could swallow unrelated halt failures.
         run(
             ZONEADM,
-            &["-u", &uuid.to_string(), "halt"],
+            &["-u", &uuid.to_string(), "halt", "-X"],
             None,
             &[],
-            &["not running", "is not in", "not been booted"],
+            &["zone is already halted"],
         )
         .await?;
         Ok(())
@@ -493,6 +534,109 @@ impl ZoneHost for HostBackend {
             .collect())
     }
 
+    async fn zfs_holds(&self, snapshot: &str) -> Result<Vec<(String, String)>> {
+        // `-H`: no header, tab-delimited. node parses the human format and
+        // splits out the tag (`VM.js` lines 8093-8135); `-H` gives us
+        // `<name>\t<tag>\t<timestamp>` directly. A missing snapshot is an
+        // empty hold list, not an error (mirrors node treating "does not
+        // exist" / "could not find" as no holds).
+        let out = run(
+            ZFS,
+            &["holds", "-H", snapshot],
+            None,
+            &[],
+            &["does not exist", "could not find"],
+        )
+        .await?;
+        Ok(out
+            .lines()
+            .filter_map(|line| {
+                let mut f = line.split('\t');
+                let name = f.next()?.to_string();
+                let tag = f.next()?.to_string();
+                Some((name, tag))
+            })
+            .collect())
+    }
+
+    async fn zfs_rename(&self, from: &str, to: &str) -> Result<()> {
+        // `-f` force, matching node's reprovision renames (`VM.js` line 11761).
+        run(ZFS, &["rename", "-f", from, to], None, &[], &[]).await?;
+        Ok(())
+    }
+
+    async fn zfs_set_prop(&self, dataset: &str, prop: &str, value: &str) -> Result<()> {
+        // Single `<prop>=<value>` (e.g. `zoned=off`), node `VM.js` line 11713.
+        run(
+            ZFS,
+            &["set", &format!("{prop}={value}"), dataset],
+            None,
+            &[],
+            &[],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn zonecfg_set_attr(&self, uuid: Uuid, name: &str, value: &str) -> Result<()> {
+        // `select attr name=<name>; set value="<value>"; end` — node `VM.js`
+        // lines 12159-12160 for the `dataset-uuid` (image_uuid) update.
+        let doc = format!("select attr name={name}; set value=\"{value}\"; end\n");
+        run(
+            ZONECFG,
+            &["-u", &uuid.to_string(), "-f", "-"],
+            Some(&doc),
+            &[],
+            &[],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn zonecfg_remove_attr(&self, uuid: Uuid, name: &str) -> Result<()> {
+        let doc = format!("remove attr name={name}\n");
+        run(
+            ZONECFG,
+            &["-u", &uuid.to_string(), "-f", "-"],
+            Some(&doc),
+            &[],
+            &[],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn zonecfg_remove_dataset(&self, uuid: Uuid, dataset: &str) -> Result<()> {
+        // `remove dataset name=<ds>` — tolerate an already-absent resource so
+        // a retried reprovision after a crash mid-dance does not fail here.
+        let doc = format!("remove dataset name={dataset}\n");
+        run(
+            ZONECFG,
+            &["-u", &uuid.to_string(), "-f", "-"],
+            Some(&doc),
+            &[],
+            &["No such dataset resource", "resource not found"],
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn zonecfg_add_dataset(&self, uuid: Uuid, dataset: &str) -> Result<()> {
+        // `add dataset; set name=<ds>; end` — the same form create emits
+        // (`VM.js` line 6001). Tolerate an already-present resource so a
+        // re-run after the re-add succeeded is a no-op.
+        let doc = format!("add dataset; set name={dataset}; end\n");
+        run(
+            ZONECFG,
+            &["-u", &uuid.to_string(), "-f", "-"],
+            Some(&doc),
+            &[],
+            &["already exists", "Invalid resource"],
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn svccfg_mdata_exec_timeout(&self, zonepath: &str, secs: u64) -> Result<()> {
         let repo = format!("{zonepath}/root/etc/svc/repository.db");
         let secs = secs.to_string();
@@ -552,9 +696,13 @@ impl ZoneHost for HostBackend {
     }
 
     async fn zfs_destroy_recursive(&self, dataset: &str) -> Result<()> {
+        // `-rF` (uppercase): recurse and retry-on-EBUSY, matching node's
+        // bhyve-disk teardown (`VM.js` lines 12754/12787 `destroy -rF`) so a
+        // momentarily-busy dataset doesn't fail the delete. Still tolerant of
+        // an already-gone dataset.
         run(
             ZFS,
-            &["destroy", "-rf", dataset],
+            &["destroy", "-rF", dataset],
             None,
             &[],
             &["does not exist", "dataset does not exist"],
@@ -769,8 +917,36 @@ async fn nictag_exists(link: &str) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HostNicTagRegistrar, is_proteus_link};
+    use super::{HostNicTagRegistrar, is_proteus_link, stderr_tolerated};
     use crate::backend::traits::NicTagRegistrar;
+
+    // M6: tolerate matching is line-anchored, not substring-anywhere.
+    #[test]
+    fn stderr_tolerated_anchoring() {
+        // node's exact already-halted phrase, trimmed + line-final, matches.
+        assert!(stderr_tolerated(
+            "zoneadm: zone is already halted\n",
+            &["zone is already halted"]
+        ));
+        // Whole-stderr trim also matches (no trailing newline).
+        assert!(stderr_tolerated(
+            "zone is already halted",
+            &["zone is already halted"]
+        ));
+        // A phrase that is only a mid-line substring must NOT be tolerated:
+        // the old `contains` would have swallowed this unrelated failure.
+        assert!(!stderr_tolerated(
+            "zone is already halted but the dataset is busy",
+            &["zone is already halted"]
+        ));
+        // Empty tolerate list never matches.
+        assert!(!stderr_tolerated("anything", &[]));
+        // A phrase on its own line within multi-line stderr matches.
+        assert!(stderr_tolerated(
+            "warning: noise\ndataset does not exist\n",
+            &["does not exist"]
+        ));
+    }
 
     #[test]
     fn proteus_link_recognition() {
