@@ -202,7 +202,7 @@ function install_pkgin
 {
 	local pkglist
 
-	pkglist="build-essential flex libxslt openjdk11 nodejs pwgen"
+	pkglist="build-essential flex libxslt openjdk11 pwgen"
 	pkglist="$pkglist p5-XML-Parser gettext python27 python312"
 	pkglist="$pkglist coreutils gsed pkg_alternatives cdrtools"
 	pkglist="$pkglist nasm pigz smartos-build-tools"

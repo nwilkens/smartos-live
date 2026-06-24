@@ -86,19 +86,7 @@
                 "release": true,
                 "mg": "platform"
             }
-        },
-	{
-	    "name": "libusdt"
-	},
-	{
-	    "name": "node-dtrace-provider"
-	},
-	{
-	    "name": "node-fs-ext"
-	},
-	{
-	    "name": "node-qlocker"
-	}
+        }
     ],
     "excludedRepositories": [
         "Cassandra-Operator",
@@ -535,7 +523,6 @@
         "sdc-workflow",
         "sdcadm",
         "sdcboot",
-        "sdcnode",
         "sdev-tests",
         "smartmachine_cookbooks",
         "smartos-dev-tools",

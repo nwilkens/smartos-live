@@ -168,96 +168,6 @@ C_CHECK_TARGETS=\
 	sysevent.c
 
 #
-# Node native add-on patterns.  For add-ons with a single source file in the
-# root of the add-on tree and no headers of its own, follow the EXPAT.NODE
-# pattern here and below in the targets.  More complex examples (source
-# subdirectory, headers, multiple C++ sources) follow; see associated comments
-# if you are looking for a pattern to copy.
-#
-
-NODE_DESTDIR =	$(PREFIX_NODE)/node_modules/
-
-EXPAT_OBJDIR =	node-expat/build/Release
-EXPAT.NODE =	$(EXPAT_OBJDIR)/node-expat.node
-
-$(EXPAT.NODE) :	NODE_WARN_FLAGS += -Wno-unused
-$(EXPAT.NODE) :	CPPFLAGS +=	$(NODE_CPPFLAGS)
-$(EXPAT.NODE) :	CXXFLAGS +=	$(NODE_CXXFLAGS)
-$(EXPAT.NODE) :	LDFLAGS +=	$(NODE_LDFLAGS)
-$(EXPAT.NODE) :	LIBS +=		-lexpat
-
-#
-# The libuuid Node add-on follows the same pattern as EXPAT.NODE.
-#
-UUID_OBJDIR =	node-libuuid/build/Release
-UUID_SRCDIR =	node-libuuid/src
-UUID.NODE =	$(UUID_OBJDIR)/uuid.node
-
-$(UUID.NODE) :	NODE_WARN_FLAGS += -Wno-unused -Wno-write-strings
-$(UUID.NODE) :	NODE_WARN_FLAGS += -Wno-sign-compare
-$(UUID.NODE) :	CPPFLAGS +=	$(NODE_CPPFLAGS)
-$(UUID.NODE) :	CXXFLAGS +=	$(NODE_CXXFLAGS)
-$(UUID.NODE) :	LDFLAGS +=	$(NODE_LDFLAGS)
-$(UUID.NODE) :	LIBS +=		-luuid
-
-#
-# The kstat Node add-on follows the same pattern as EXPAT.NODE.
-#
-KSTAT_OBJDIR =	node-kstat/build/Release
-KSTAT.NODE =	$(KSTAT_OBJDIR)/kstat.node
-
-$(KSTAT.NODE) :	NODE_WARN_FLAGS += -Wno-unused -Wno-write-strings
-$(KSTAT.NODE) :	NODE_WARN_FLAGS += -Wno-sign-compare
-$(KSTAT.NODE) :	NODE_WARN_FLAGS += -Wno-format-truncation
-$(KSTAT.NODE) :	CPPFLAGS +=	$(NODE_CPPFLAGS)
-$(KSTAT.NODE) :	CXXFLAGS +=	$(NODE_CXXFLAGS)
-$(KSTAT.NODE) :	LDFLAGS +=	$(NODE_LDFLAGS)
-$(KSTAT.NODE) :	LIBS +=		-lkstat
-
-NODE_SUBDIR_ENV = \
-			V=1 \
-			NODE_DTRACE_PROVIDER_REQUIRE=hard \
-			PYTHON="/opt/local/bin/python2.7" \
-			CC="$(GCC)" \
-			CXX="$(GXX)" \
-			CPPFLAGS="$(NODE_CPPFLAGS)" \
-			CFLAGS="$(NODE_CFLAGS)" \
-			CXXFLAGS="$(NODE_CXXFLAGS)" \
-			LDFLAGS="$(NODE_LDFLAGS)"
-
-DTRACE_PROVIDER_SRCDIR =	node-dtrace-provider
-
-$(DTRACE_PROVIDER_SRCDIR): NODE_WARN_FLAGS += -Wno-sign-compare
-$(DTRACE_PROVIDER_SRCDIR): NODE_WARN_FLAGS += -Wno-unused-parameter
-
-$(DTRACE_PROVIDER_SRCDIR):
-	cd $(DTRACE_PROVIDER_SRCDIR) && $(NODE_SUBDIR_ENV) $(NPM_EXEC) install \
-	    --production --unsafe-perm
-
-CLEANFILES += $(DTRACE_PROVIDER_SRCDIR)/build
-CLEANFILES += $(DTRACE_PROVIDER_SRCDIR)/node_modules
-CLEANFILES += $(DTRACE_PROVIDER_SRCDIR)/src/build
-
-QLOCKER_SRCDIR =		node-qlocker
-QLOCKER_DESTDIR =		$(NODE_DESTDIR)/qlocker
-
-$(QLOCKER_SRCDIR):
-	cd $(QLOCKER_SRCDIR) && $(NODE_SUBDIR_ENV) $(NPM_EXEC) install \
-	    --production --unsafe-perm
-
-CLEANFILES += $(QLOCKER_SRCDIR)/node_modules
-
-ZONENAME_SRCDIR =		node-zonename
-ZONENAME_DESTDIR =		$(NODE_DESTDIR)/zonename
-
-$(ZONENAME_SRCDIR):
-	cd $(ZONENAME_SRCDIR) && $(NODE_SUBDIR_ENV) $(NPM_EXEC) install \
-	    --production --unsafe-perm
-
-CLEANFILES += $(ZONENAME_SRCDIR)/build
-CLEANFILES += $(ZONENAME_SRCDIR)/node_modules
-
-#
 # Rules for building the nomknod related shared object.
 #
 NOMKNOD_SRC =		nomknod.c
@@ -278,50 +188,32 @@ CLEANFILES +=		$(NOMKNOD_TARGS)
 
 BUILT_TARGETS = \
 	bootparams \
-	disklayout \
 	disklist \
 	disk_size \
 	fssstat \
 	fswatcher \
-	json \
-	mkzpool \
 	nomknod.so.32 \
 	nomknod.so.64 \
 	piadm \
 	removable_disk \
 	sysevent \
 	sysinfo_mod.so \
-	vm/node_modules/props.js \
 	vmunbundle \
 	zfs_recv \
 	zfs_send \
 	zonememstat \
 	zonemon \
-	$(EXPAT.NODE) \
-	$(KSTAT.NODE) \
-	$(NOMKNOD_TARGS) \
-	$(UUID.NODE)
-
-NPM_TARGETS = \
-	$(DTRACE_PROVIDER_SRCDIR) \
-	$(ZONENAME_SRCDIR) \
-	$(QLOCKER_SRCDIR)
-
-.PHONY: $(NPM_TARGETS)
+	$(NOMKNOD_TARGS)
 
 USRBIN_TARGETS = \
 	bootparams \
-	disklayout \
 	disklist \
 	disk_size \
-	json \
-	mkzpool \
 	nictagadm \
 	removable_disk \
 	sysinfo
 
 TARGETS = $(BUILT_TARGETS) \
-	$(NPM_TARGETS) \
 	$(USRBIN_TARGETS)
 
 BUILT_USR_LIB_TARGETS = \
@@ -340,7 +232,6 @@ BUILT_SMARTDC_TARGETS = \
 SMARTDC_TARGETS = $(BUILT_SMARTDC_TARGETS)
 
 BUILT_SMARTDC_LIB_TARGETS = \
-	smartdc/lib/ntp_config \
 	smartdc/lib/sdc-on-tty
 
 SMARTDC_LIB_TARGETS = \
@@ -441,34 +332,6 @@ install: all $(SUBDIRS)
 	cp -Pr vm/tests/testdata $(DESTDIR)/usr/vm/test/
 	cp vm/runtest $(DESTDIR)/usr/vm/test/
 	cp vm/runtests $(DESTDIR)/usr/vm/test/
-	# /usr/node/node_modules
-	mkdir -m 0755 -p $(NODE_DESTDIR)
-	cp -Pr node_modules/* $(NODE_DESTDIR)
-	cp $(KSTAT.NODE) $(NODE_DESTDIR)/
-	cp $(EXPAT.NODE) $(NODE_DESTDIR)/expat_binding.node
-	cp $(UUID.NODE) $(NODE_DESTDIR)/uuid.node
-	mkdir -p $(ZONENAME_DESTDIR)/build/Release
-	cp $(ZONENAME_SRCDIR)/build/Release/zonename.node \
-	    $(ZONENAME_DESTDIR)/build/Release
-	cp $(ZONENAME_SRCDIR)/index.js $(ZONENAME_SRCDIR)/package.json \
-	    $(ZONENAME_DESTDIR)/
-	mkdir -p $(NODE_DESTDIR)/src/build/Release
-	cp $(DTRACE_PROVIDER_SRCDIR)/src/build/Release/DTraceProviderBindings.node \
-	    $(NODE_DESTDIR)/src/build/Release/DTraceProviderBindings.node
-	cp $(DTRACE_PROVIDER_SRCDIR)//dtrace-provider.js \
-	    $(NODE_DESTDIR)/dtrace-provider.js
-	mkdir -p $(QLOCKER_DESTDIR)/lib
-	cp $(QLOCKER_SRCDIR)/index.js $(QLOCKER_DESTDIR)/
-	cp $(QLOCKER_SRCDIR)/lib/qlocker.js $(QLOCKER_DESTDIR)/lib/
-	mkdir -p $(NODE_DESTDIR)/fs-ext/build/Release/
-	cp $(QLOCKER_SRCDIR)/node_modules/fs-ext/package.json \
-	    $(QLOCKER_SRCDIR)/node_modules/fs-ext/fs-ext.js \
-	    $(NODE_DESTDIR)/fs-ext/
-	cp $(QLOCKER_SRCDIR)/node_modules/fs-ext/build/Release/fs-ext.node \
-	    $(NODE_DESTDIR)/fs-ext/build/Release/
-	sed -e "s|var expat.*;|var expat = require('./expat_binding');|" \
-	    < node-expat/lib/node-expat.js \
-	    > $(NODE_DESTDIR)/node-expat.js
 	# others
 	cp fswatcher $(DESTDIR)/usr/vm/sbin/fswatcher
 	cp dockerinit/build/dockerinit $(DESTDIR)/usr/vm/sbin/dockerinit
@@ -498,13 +361,6 @@ install: all $(SUBDIRS)
 		cp $(RUST_RELEASE_DIR)/$$tool $(DESTDIR)/usr/vm/sbin/$$tool; \
 		chmod 0555 $(DESTDIR)/usr/vm/sbin/$$tool; \
 	done
-	# Node bunyan library stays for node modules that require('bunyan');
-	# only the /usr/bin/bunyan tool becomes the Rust binary.
-	sed -e "s|require('dtrace-provider'|require('/usr/node/node_modules/dtrace-provider'|" \
-	    < node-bunyan/lib/bunyan.js \
-	    > $(NODE_DESTDIR)/bunyan.js
-	mkdir -p $(DESTDIR)/usr/share/man/man1
-	cp node-bunyan/docs/bunyan.1 $(DESTDIR)/usr/share/man/man1/bunyan.1
 	mkdir -p $(DESTDIR)/usr/bin
 	cp $(RUST_RELEASE_DIR)/bunyan $(DESTDIR)/usr/bin/bunyan
 	chmod 0555 $(DESTDIR)/usr/bin/bunyan
@@ -533,12 +389,6 @@ install: all $(SUBDIRS)
 	cp $(RUST_RELEASE_DIR)/fwadm $(DESTDIR)/usr/fw/sbin/fwadm
 	chmod 0555 $(DESTDIR)/usr/fw/sbin/fwadm
 	cp -Pr node_modules/onlyif.js $(DESTDIR)/usr/fw/node_modules/onlyif.js
-	cp $(DESTDIR)/usr/node/0.10/node_modules/dtrace-provider.js $(DESTDIR)/usr/fw/node_modules/dtrace-provider.js
-	cp $(DTRACE_PROVIDER_SRCDIR)/src/build/Release/DTraceProviderBindings.node \
-	     $(DESTDIR)/usr/fw/node_modules/DTraceProviderBindings.node
-	sed -e "s|require('dtrace-provider')|require('/usr/fw/node_modules/dtrace-provider')|" \
-	    < node-bunyan/lib/bunyan.js \
-	    > $(DESTDIR)/usr/fw/node_modules/bunyan.js
 	mkdir -m 0755 -p $(DESTDIR)/usr/lib/sdc
 	cp -p net-boot-config $(DESTDIR)/usr/lib/sdc
 	cd routeinfo && $(MAKE) install
@@ -618,26 +468,6 @@ include Makefile.targ
 # Custom rules for building our various real targets follow.  Generic rules
 # belong in Makefile.targ.
 #
-vm/node_modules/props.js: vm/node_modules/proptable.js vm/node_modules/expander.js
-	node vm/node_modules/expander.js > vm/node_modules/props.js.new \
-		&& mv vm/node_modules/props.js.new vm/node_modules/props.js
-
-#
-# Node native add-on target patterns.  Follow these patterns when adding a new
-# add-on and see the comment and definitions for EXPAT.NODE above as well.
-#
-$(EXPAT.NODE): node-expat/node-expat.cc
-	@mkdir -p $(@D)
-	$(LINK32.cc) $^ $(LIBS)
-
-$(KSTAT.NODE): node-kstat/kstat.cc
-	@mkdir -p $(@D)
-	$(LINK32.cc) $^ $(LIBS)
-
-$(UUID.NODE): $(UUID_SRCDIR)/uuid.cc
-	@mkdir -p $(@D)
-	$(LINK32.cc) $^ $(LIBS)
-
 $(NOMKNOD_32):	$(NOMKNOD_SRC)
 	$(LINK32.c) $^
 
