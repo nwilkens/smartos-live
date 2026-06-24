@@ -25,6 +25,7 @@ members = [
     "crates/add-userscript",
     "crates/vminfod",
     "crates/vminfo",
+    "crates/metadata",
 ]
 
 [workspace.package]
