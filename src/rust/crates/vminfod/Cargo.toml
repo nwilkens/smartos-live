@@ -1,0 +1,41 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Copyright 2026 Edgecast Cloud LLC.
+
+[package]
+name = "vminfod"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Native Rust replacement for the SmartOS node vminfod daemon: an in-memory VM cache + zone/fs watchers serving GET /ping /status /vms /vms/:uuid /events on 127.0.0.1:9090"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "vminfod"
+path = "src/main.rs"
+
+[lib]
+name = "vminfod"
+path = "src/lib.rs"
+
+[dependencies]
+tritond-vmadm = { workspace = true }
+
+anyhow = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tower = { workspace = true }

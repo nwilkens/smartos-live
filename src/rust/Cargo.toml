@@ -23,6 +23,8 @@ members = [
     "crates/zoneevent",
     "crates/ntp_config",
     "crates/add-userscript",
+    "crates/vminfod",
+    "crates/vminfo",
 ]
 
 [workspace.package]
@@ -62,6 +64,13 @@ tokio = { version = "1.48", features = ["full"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 tempfile = "3"
+# vminfod HTTP daemon + client stack.
+axum = "0.8"
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+tower = "0.5"
+futures = "0.3"
 
 # Release binaries ship in the PI; abort keeps them small and avoids
 # unwinding through the illumos C boundary. The test profile keeps the
