@@ -115,6 +115,19 @@ pub struct VmadmCreatePayload {
     #[serde(default)]
     pub tags: Option<JsonMap>,
 
+    // docker (proptable.js:798). A docker zone is an lx/joyent-minimal zone
+    // with docker=true plus `docker:*` internal_metadata (which flows in via
+    // `internal_metadata` above). The create path derives the rest
+    // (VM.js:10085-10148). `init_name`/`restart_init` are also accepted
+    // directly by node (proptable.js:1006/1842); an explicit value wins over
+    // the docker-derived default.
+    #[serde(default)]
+    pub docker: Option<bool>,
+    #[serde(default)]
+    pub init_name: Option<String>,
+    #[serde(default)]
+    pub restart_init: Option<bool>,
+
     #[serde(default, alias = "nics")]
     pub add_nics: Option<Vec<NicPayload>>,
     #[serde(default, alias = "disks")]

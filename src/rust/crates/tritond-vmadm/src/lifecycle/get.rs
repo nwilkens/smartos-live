@@ -105,6 +105,20 @@ async fn reconstruct<H: ZoneHost>(host: &H, uuid: Uuid, info: ZoneRuntime) -> Re
         .and_then(|s| s.parse().ok());
     // lx kernel-version attr (node `kernel_version`); absent for other brands.
     vm.kernel_version = parsed.attrs.get("kernel-version").cloned();
+    // docker attrs (proptable.js:798/1006/1842/1034/zlog-mode). docker is a
+    // boolean attr (utils.fixBoolean); the others are the docker-derived
+    // init/restart/namespaces/log fields a docker zone carries.
+    vm.docker = parsed.attrs.get("docker").is_some_and(|v| v == "true");
+    vm.init_name = parsed.attrs.get("init-name").cloned();
+    vm.restart_init = parsed.attrs.get("restart-init").map(|v| v == "true");
+    if let Some(ns) = parsed.attrs.get("internal-metadata-namespaces") {
+        vm.internal_metadata_namespaces = ns
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+    vm.zlog_mode = parsed.attrs.get("zlog-mode").cloned();
     vm.create_timestamp = parsed
         .attrs
         .get("create-timestamp")

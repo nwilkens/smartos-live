@@ -164,6 +164,82 @@ select net mac-addr=2:0:0:aa:bb:cc; add property (name=primary,value=\"true\"); 
 }
 
 #[test]
+fn docker_lx_create_blob() {
+    // A docker zone is an lx zone with docker=true plus docker:* metadata
+    // (src/dockerinit/README.md:13). Hand-traced from VM.js createZone +
+    // the docker derivation (VM.js:10085-10148): the lx blob plus the
+    // docker=true / restart-init=false / init-name / namespaces / zlog-mode
+    // attrs. docker:id/docker:cmd live in metadata.json, not the zonecfg, so
+    // they do not appear here. Same lx base as `lx_create_blob`.
+    let got = render(serde_json::json!({
+        "uuid": "11111111-1111-1111-1111-111111111111",
+        "brand": "lx",
+        "image_uuid": "4d3ed29a-c851-11e6-b5a9-639aada4a9c8",
+        "kernel_version": "4.4.0",
+        "alias": "lx0",
+        "docker": true,
+        "max_physical_memory": 256,
+        "max_locked_memory": 256,
+        "max_swap": 256,
+        "tmpfs": 256,
+        "cpu_shares": 100,
+        "quota": 10,
+        "internal_metadata": { "docker:cmd": "[\"/bin/sleep\",\"3600\"]" },
+        "nics": [{
+            "interface": "net0", "nic_tag": "admin",
+            "ip": "10.88.88.50", "netmask": "255.255.255.0",
+            "gateway": "10.88.88.2", "mac": "02:00:00:aa:bb:cc", "primary": true
+        }]
+    }));
+
+    let want = "\
+create -b
+set zonepath=/zones/11111111-1111-1111-1111-111111111111
+set brand=lx
+set uuid=11111111-1111-1111-1111-111111111111
+set ip-type=exclusive
+add attr; set name=\"provisioning\"; set type=string; set value=true;end
+add attr; set name=\"vm-version\"; set type=string; set value=\"1\"; end
+add attr; set name=\"create-timestamp\"; set type=string; set value=\"1970-01-01T00:00:00.000Z\"; end
+add attr; set name=transition; set value=\"provisioning:running:300000\"; set type=string; end
+add attr; set name=\"dataset-uuid\"; set type=string; set value=\"4d3ed29a-c851-11e6-b5a9-639aada4a9c8\"; end
+set cpu-shares=100
+set limitpriv=\"default\"
+set max-lwps=2000
+set max-msg-ids=4096
+set max-sem-ids=4096
+set max-shm-ids=4096
+set max-shm-memory=268435456
+set zfs-io-priority=100
+set autoboot=true
+add capped-memory; set physical=256m; set locked=256m; set swap=256m; end
+add attr; set name=\"billing-id\"; set type=string; set value=\"00000000-0000-0000-0000-000000000000\"; end
+add attr; set name=\"owner-uuid\"; set type=string; set value=\"00000000-0000-0000-0000-000000000000\"; end
+add attr; set name=\"tmpfs\"; set type=string; set value=\"256\"; end
+add attr; set name=\"dns-domain\"; set type=string; set value=\"local\"; end
+add attr; set name=\"docker\"; set type=string; set value=\"true\"; end
+add attr; set name=\"restart-init\"; set type=string; set value=\"false\"; end
+add attr; set name=\"init-name\"; set type=string; set value=\"/native/usr/vm/sbin/dockerinit\"; end
+add attr; set name=\"kernel-version\"; set type=string; set value=\"4.4.0\"; end
+add attr; set name=\"internal-metadata-namespaces\"; set type=string; set value=\"docker\"; end
+add attr; set name=\"zlog-mode\"; set type=string; set value=\"g--\"; end
+add attr; set name=\"alias\"; set type=string; set value=\"bHgw\"; end
+add net
+set physical=net0
+set mac-addr=2:0:0:aa:bb:cc
+set global-nic=admin
+add property (name=gateway, value=\"10.88.88.2\")
+add property (name=gateways, value=\"10.88.88.2\")
+add property (name=netmask, value=\"255.255.255.0\")
+add property (name=ip, value=\"10.88.88.50\")
+add property (name=ips, value=\"10.88.88.50/24\")
+end
+select net mac-addr=2:0:0:aa:bb:cc; add property (name=primary,value=\"true\"); end
+";
+    assert_eq!(got, want, "\n--- got ---\n{got}\n--- want ---\n{want}");
+}
+
+#[test]
 fn bhyve_create_blob() {
     let got = render(serde_json::json!({
         "uuid": "11111111-1111-1111-1111-111111111111",

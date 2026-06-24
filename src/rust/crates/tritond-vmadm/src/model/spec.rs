@@ -88,6 +88,34 @@ pub struct VmCreateSpec {
     pub internal_metadata: JsonMap,
     pub tags: JsonMap,
 
+    /// The `docker` flag (proptable.js:798): a docker zone is an lx (or
+    /// joyent-minimal) zone with this set true plus `docker:*`
+    /// internal_metadata, run by the in-zone dockerinit. NOT a brand
+    /// (src/dockerinit/README.md:13). When true the create path derives the
+    /// docker-specific fields below (VM.js:10085-10148).
+    pub docker: bool,
+    /// `restart-init` zonecfg attr (VM.js:6949). docker forces this false so
+    /// zoneadmd does not restart the container init (OS-3546, VM.js:10108).
+    /// `None` means the attr is not emitted (node default restart_init=true).
+    pub restart_init: Option<bool>,
+    /// `init-name` zonecfg attr (VM.js:6950). docker sets it to the brand's
+    /// dockerinit path (VM.js:10116-10122). `None` means the brand default.
+    pub init_name: Option<String>,
+    /// `internal-metadata-namespaces` zonecfg attr (VM.js:6962). docker adds
+    /// `docker` so the `docker:*` keys are GZ-controlled and immutable from
+    /// inside the zone (VM.js:10097-10103).
+    pub internal_metadata_namespaces: Vec<String>,
+    /// `zlog-mode` zonecfg attr for docker zones (buildDockerLogZonecfg,
+    /// VM.js:6596). `Some` only when `docker` is set; computed from
+    /// `docker:tty` + `docker:logdriver` (calculateZlogModeAndDriver,
+    /// VM.js:19523). `None` for non-docker zones (no zlog-mode emitted),
+    /// except bhyve which sets its own platform-log zlog-mode in build.rs.
+    pub zlog_mode: Option<String>,
+    /// `app-svc-dependent` zonecfg attr (VM.js:6635): emitted `true` when a
+    /// docker zone uses a logger-backed log driver (not json-file/none), so
+    /// init dies when the logger does. `false` otherwise.
+    pub app_svc_dependent: bool,
+
     pub nics: Vec<NicSpec>,
     pub disks: Vec<DiskSpec>,
     pub bhyve_extra_opts: Option<String>,

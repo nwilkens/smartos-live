@@ -9,6 +9,7 @@
 //! ([`normalize`]).
 
 pub mod compat;
+pub mod docker;
 pub mod normalize;
 
 pub use compat::{DiskPayload, NicPayload, VmadmCreatePayload};

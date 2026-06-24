@@ -37,10 +37,24 @@ pub fn normalize(
             "archive_on_delete is not yet supported by this vmadm".to_string(),
         ));
     }
-    if payload
-        .internal_metadata_namespaces
-        .as_ref()
-        .is_some_and(|n| !n.is_empty())
+    let docker = payload.docker.unwrap_or(false);
+    // docker is only accepted on the OS brands that carry a dockerinit
+    // (proptable.js:802 allows it only on lx/joyent-minimal). A docker zone
+    // is not a brand: it is one of these brands plus the flag
+    // (src/dockerinit/README.md:13).
+    if docker && !brand.supports_docker() {
+        return Err(VmadmError::Payload(format!(
+            "docker is not supported on the {} brand",
+            brand.as_str()
+        )));
+    }
+    // internal_metadata_namespaces: node lets callers control these
+    // (proptable.js:1034), but this engine only ports the docker case
+    // (VM.js:10097-10103). When docker=true the engine derives `["docker"]`;
+    // any non-docker namespace remains unported, so reject a payload that
+    // supplies namespaces the docker path would not produce.
+    if let Some(ns) = payload.internal_metadata_namespaces.as_ref()
+        && ns.iter().any(|n| n != "docker")
     {
         return Err(VmadmError::Payload(
             "internal_metadata_namespaces are not yet supported by this vmadm".to_string(),
@@ -149,6 +163,43 @@ pub fn normalize(
         flexible_disk_size_mib = flexible_disk_size_mib.map(|f| f + k::NOCLOUD_DISK_SIZE_MIB);
     }
 
+    // docker derivation (VM.js:10085-10148): stamp docker:id, force
+    // restart_init=false, init_name=features.dockerinit, namespaces+=docker,
+    // and compute the docker log attrs. Runs after internal_metadata is
+    // assembled so docker:tty/docker:logdriver from the payload are visible.
+    let (docker_restart_init, docker_init_name, docker_namespaces, docker_zlog, docker_app_svc) =
+        if docker {
+            let d = crate::payload::docker::derive(
+                brand,
+                payload.init_name.clone(),
+                payload.restart_init,
+                payload
+                    .internal_metadata_namespaces
+                    .as_deref()
+                    .unwrap_or(&[]),
+                uuid,
+                &mut internal_metadata,
+            )?;
+            (
+                d.restart_init,
+                d.init_name,
+                d.internal_metadata_namespaces,
+                d.zlog_mode,
+                d.app_svc_dependent,
+            )
+        } else {
+            // Non-docker zones honor an explicit init_name/restart_init the
+            // payload sets directly (proptable.js:1006/1842) but emit no
+            // namespaces or zlog-mode.
+            (
+                payload.restart_init,
+                payload.init_name.clone(),
+                Vec::new(),
+                None,
+                false,
+            )
+        };
+
     let spec = VmCreateSpec {
         uuid,
         zonename,
@@ -211,6 +262,13 @@ pub fn normalize(
         customer_metadata,
         internal_metadata,
         tags: payload.tags.unwrap_or_default(),
+
+        docker,
+        restart_init: docker_restart_init,
+        init_name: docker_init_name,
+        internal_metadata_namespaces: docker_namespaces,
+        zlog_mode: docker_zlog,
+        app_svc_dependent: docker_app_svc,
 
         nics,
         disks,
@@ -733,6 +791,16 @@ fn validate_spec(spec: &VmCreateSpec) -> Result<(), VmadmError> {
     if let Some(kv) = &spec.kernel_version {
         reject_zonecfg_text("kernel_version", kv)?;
     }
+    // init_name (docker init-name attr) and the internal-metadata-namespaces
+    // attr both reach the quoted zonecfg stream; validate them even though
+    // the engine-derived values (dockerinit path, `docker`) are safe, since
+    // init_name may be caller-supplied (proptable.js:1006).
+    if let Some(init_name) = &spec.init_name {
+        reject_zonecfg_text("init_name", init_name)?;
+    }
+    for ns in &spec.internal_metadata_namespaces {
+        reject_zonecfg_ident("internal_metadata_namespace", ns)?;
+    }
     for lp in &spec.limit_priv {
         reject_zonecfg_ident("limit_priv", lp)?;
     }
@@ -945,6 +1013,124 @@ mod tests {
         )
         .unwrap();
         assert!(normalize(p, epoch()).is_err());
+    }
+
+    #[test]
+    fn docker_lx_derives_id_namespaces_restart_init_and_init_name() {
+        // VM.js:10085-10148: docker=true on an lx zone derives the docker
+        // state. docker:id is generated, namespaces gains `docker`,
+        // restart_init is forced false, init_name is the lx dockerinit path.
+        let spec = parse(serde_json::json!({
+            "uuid": "00000000-0000-0000-0000-000000000001",
+            "brand": "lx",
+            "image_uuid": "4d3ed29a-c851-11e6-b5a9-639aada4a9c8",
+            "kernel_version": "4.4.0",
+            "docker": true,
+            "internal_metadata": { "docker:cmd": "[\"/bin/sleep\",\"3600\"]" }
+        }));
+        assert!(spec.docker);
+        assert_eq!(spec.restart_init, Some(false));
+        assert_eq!(
+            spec.init_name.as_deref(),
+            Some("/native/usr/vm/sbin/dockerinit")
+        );
+        assert_eq!(spec.internal_metadata_namespaces, vec!["docker".to_string()]);
+        // docker:id stamped (64 hex chars) and docker:cmd preserved.
+        let id = spec
+            .internal_metadata
+            .get("docker:id")
+            .and_then(Value::as_str)
+            .expect("docker:id");
+        assert_eq!(id.len(), 64);
+        assert_eq!(
+            spec.internal_metadata
+                .get("docker:cmd")
+                .and_then(Value::as_str),
+            Some("[\"/bin/sleep\",\"3600\"]")
+        );
+        // default log mode is g-- (json-file, no tty), no app-svc-dependent.
+        assert_eq!(spec.zlog_mode.as_deref(), Some("g--"));
+        assert!(!spec.app_svc_dependent);
+    }
+
+    #[test]
+    fn docker_preserves_supplied_docker_id() {
+        let id = "a".repeat(64);
+        let spec = parse(serde_json::json!({
+            "uuid": "00000000-0000-0000-0000-000000000001",
+            "brand": "lx",
+            "image_uuid": "4d3ed29a-c851-11e6-b5a9-639aada4a9c8",
+            "kernel_version": "4.4.0",
+            "docker": true,
+            "internal_metadata": { "docker:id": id }
+        }));
+        assert_eq!(
+            spec.internal_metadata
+                .get("docker:id")
+                .and_then(Value::as_str),
+            Some("a".repeat(64).as_str())
+        );
+    }
+
+    #[test]
+    fn docker_joyent_minimal_uses_native_dockerinit_path() {
+        // joyent-minimal also supports docker (proptable.js:803); its
+        // dockerinit path is the non-/native one (proptable.js:2420).
+        let spec = parse(serde_json::json!({
+            "uuid": "00000000-0000-0000-0000-000000000001",
+            "brand": "joyent-minimal",
+            "image_uuid": "4d3ed29a-c851-11e6-b5a9-639aada4a9c8",
+            "docker": true
+        }));
+        assert_eq!(spec.init_name.as_deref(), Some("/usr/vm/sbin/dockerinit"));
+    }
+
+    #[test]
+    fn docker_tty_and_logdriver_drive_zlog_mode() {
+        let spec = parse(serde_json::json!({
+            "uuid": "00000000-0000-0000-0000-000000000001",
+            "brand": "lx",
+            "image_uuid": "4d3ed29a-c851-11e6-b5a9-639aada4a9c8",
+            "kernel_version": "4.4.0",
+            "docker": true,
+            "internal_metadata": {
+                "docker:tty": "true",
+                "docker:logdriver": "syslog"
+            }
+        }));
+        // logger-backed driver + tty => gtn, app-svc-dependent=true.
+        assert_eq!(spec.zlog_mode.as_deref(), Some("gtn"));
+        assert!(spec.app_svc_dependent);
+    }
+
+    #[test]
+    fn docker_rejected_on_bhyve_and_kvm() {
+        // proptable.js:802: docker is allowed only on lx/joyent-minimal.
+        for brand in ["bhyve", "kvm"] {
+            let err = try_parse(serde_json::json!({
+                "brand": brand, "ram": 512, "docker": true
+            }))
+            .unwrap_err();
+            assert!(
+                matches!(err, VmadmError::Payload(_)),
+                "{brand} docker should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn non_docker_lx_has_no_docker_attrs() {
+        // Without docker=true, no docker-derived state is produced.
+        let spec = parse(serde_json::json!({
+            "brand": "lx",
+            "image_uuid": "4d3ed29a-c851-11e6-b5a9-639aada4a9c8",
+            "kernel_version": "4.4.0"
+        }));
+        assert!(!spec.docker);
+        assert_eq!(spec.restart_init, None);
+        assert_eq!(spec.init_name, None);
+        assert!(spec.internal_metadata_namespaces.is_empty());
+        assert_eq!(spec.zlog_mode, None);
     }
 
     #[test]

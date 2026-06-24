@@ -72,6 +72,15 @@ impl Brand {
         matches!(self, Brand::JoyentMinimal | Brand::Lx)
     }
 
+    /// Whether the `docker` flag is accepted on this brand. proptable.js:802
+    /// allows `docker` only on lx and joyent-minimal; every other brand
+    /// rejects it. A docker zone is just one of these brands with the flag,
+    /// not a distinct brand (src/dockerinit/README.md:13).
+    #[must_use]
+    pub fn supports_docker(self) -> bool {
+        self.features().dockerinit.is_some()
+    }
+
     /// The brand's features, mirroring the subset of
     /// `proptable.js` `features` the engine consults.
     #[must_use]
@@ -99,6 +108,9 @@ impl Brand {
                 // OS zones have no zvol disks; the disk-model set is unused.
                 disk_models: &[],
                 interface_prefix: "net",
+                // proptable.js:2420 joyent-minimal.features.dockerinit: the
+                // in-zone dockerinit lives at the SmartOS-native path.
+                dockerinit: Some("/usr/vm/sbin/dockerinit"),
             },
             Brand::Bhyve => BrandFeatures {
                 var_svc_provisioning: false,
@@ -124,6 +136,10 @@ impl Brand {
                 // proptable.js:2383 bhyve disk_models.
                 disk_models: &["virtio", "ahci", "nvme"],
                 interface_prefix: "net",
+                // bhyve does not accept the docker flag (proptable.js:802
+                // allows it only on lx/joyent-minimal) and carries no
+                // dockerinit feature.
+                dockerinit: None,
             },
             // proptable.js:2433 brand_options.kvm.features. KVM is HVM like
             // bhyve, but: it owns the zoneroot (var_svc_provisioning=true,
@@ -162,6 +178,8 @@ impl Brand {
                 // proptable.js:2449 kvm disk_models.
                 disk_models: &["virtio", "scsi", "ide"],
                 interface_prefix: "net",
+                // kvm does not accept the docker flag (proptable.js:802).
+                dockerinit: None,
             },
             // proptable.js:2451 brand_options.lx.features. lx mirrors
             // joyent-minimal's OS sizing/priv model; the only behavioural
@@ -197,6 +215,10 @@ impl Brand {
                 // the lx brand presents Linux ethN names, so the zonecfg
                 // `physical` must match (eth0, not net0).
                 interface_prefix: "eth",
+                // proptable.js:2454 lx.features.dockerinit: the lx brand's
+                // dockerinit is the /native (Linux ABI) path. VM.js:10120
+                // derives init_name from this when docker=true.
+                dockerinit: Some("/native/usr/vm/sbin/dockerinit"),
             },
         }
     }
@@ -243,6 +265,12 @@ pub struct BrandFeatures {
     /// Linux names match (proptable.js:2455 `interface_prefix: 'eth'`;
     /// VM.js:6195 falls back to `net` when the feature is absent).
     pub interface_prefix: &'static str,
+    /// The in-zone dockerinit path the create path stamps into `init-name`
+    /// when `docker=true` (proptable.js:2420/2454, VM.js:10116-10122).
+    /// `Some` only on the docker-capable OS brands (lx => `/native/...`,
+    /// joyent-minimal => `/usr/vm/sbin/dockerinit`); `None` means the brand
+    /// does not accept the docker flag.
+    pub dockerinit: Option<&'static str>,
 }
 
 #[cfg(test)]
@@ -333,6 +361,27 @@ mod tests {
         // kvm disk models differ from bhyve.
         assert_eq!(f.disk_models, &["virtio", "scsi", "ide"]);
         assert_eq!(Brand::Bhyve.features().disk_models, &["virtio", "ahci", "nvme"]);
+    }
+
+    #[test]
+    fn docker_supported_only_on_os_brands() {
+        // proptable.js:802: docker is allowed only on lx and joyent-minimal.
+        // Both carry a dockerinit path; the HVM brands carry none.
+        assert!(Brand::Lx.supports_docker());
+        assert!(Brand::JoyentMinimal.supports_docker());
+        assert!(!Brand::Bhyve.supports_docker());
+        assert!(!Brand::Kvm.supports_docker());
+        // proptable.js:2420/2454: the dockerinit paths differ by brand.
+        assert_eq!(
+            Brand::Lx.features().dockerinit,
+            Some("/native/usr/vm/sbin/dockerinit")
+        );
+        assert_eq!(
+            Brand::JoyentMinimal.features().dockerinit,
+            Some("/usr/vm/sbin/dockerinit")
+        );
+        assert_eq!(Brand::Bhyve.features().dockerinit, None);
+        assert_eq!(Brand::Kvm.features().dockerinit, None);
     }
 
     #[test]

@@ -217,6 +217,29 @@ pub struct VmGetJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kernel_version: Option<String>,
 
+    // ---- docker (proptable.js:798/1006/1842/1034) ----
+    /// The `docker` flag (zone.attr.docker, utils.fixBoolean). node applies
+    /// the proptable default `false`, so it is always reported on the
+    /// docker-capable OS brands; reported only when true here to keep the
+    /// HVM/joyent output identical to before.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub docker: bool,
+    /// `init-name` attr (node `init_name`); the dockerinit path on a docker
+    /// zone (VM.js:6950).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub init_name: Option<String>,
+    /// `restart-init` attr (node `restart_init`, utils.fixBoolean). docker
+    /// forces it false (VM.js:6949); reported only when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_init: Option<bool>,
+    /// `internal-metadata-namespaces` attr (node `internal_metadata_namespaces`,
+    /// comma-separated). Contains `docker` for a docker zone (VM.js:6962).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub internal_metadata_namespaces: Vec<String>,
+    /// `zlog-mode` attr (node `zlog_mode`); the docker log mode (VM.js:6968).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zlog_mode: Option<String>,
+
     // ---- zfs-derived ----
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zfs_filesystem: Option<String>,
@@ -331,6 +354,11 @@ impl VmGetJson {
             firewall_enabled: false,
             image_uuid: None,
             kernel_version: None,
+            docker: false,
+            init_name: None,
+            restart_init: None,
+            internal_metadata_namespaces: Vec::new(),
+            zlog_mode: None,
             zfs_filesystem: None,
             zpool: None,
             zfs_root_recsize: None,

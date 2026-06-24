@@ -115,6 +115,22 @@ fn emit_attrs(z: &mut Zonecfg, spec: &VmCreateSpec) {
     if spec.do_not_inventory {
         z.attr("do-not-inventory", "true");
     }
+    // docker / restart-init / init-name (VM.js:6946/6949/6950 setAttr order).
+    // A docker zone carries `docker=true`; restart-init/init-name are derived
+    // by the docker path (or set directly by the payload).
+    if spec.docker {
+        z.attr("docker", "true");
+    }
+    // restart-init is emitted only when false: node's setAttr drops the attr
+    // for the default true (the empty-value path coerces restart_init=true to
+    // '' at VM.js:6868-6871), so a non-docker zone with the default never
+    // emits it.
+    if spec.restart_init == Some(false) {
+        z.attr("restart-init", "false");
+    }
+    if let Some(init_name) = &spec.init_name {
+        z.attr("init-name", init_name);
+    }
     if spec.firewall_enabled {
         z.attr("firewall-enabled", "true");
     }
@@ -129,6 +145,27 @@ fn emit_attrs(z: &mut Zonecfg, spec: &VmCreateSpec) {
     // present in the zonecfg the brand inspects.
     if let Some(kv) = &spec.kernel_version {
         z.attr("kernel-version", kv);
+    }
+    // internal-metadata-namespaces (VM.js:6962-6966): the comma-joined list,
+    // emitted only when non-empty. docker zones carry `docker` here so the
+    // `docker:*` keys are immutable from inside the zone.
+    if !spec.internal_metadata_namespaces.is_empty() {
+        z.attr(
+            "internal-metadata-namespaces",
+            &spec.internal_metadata_namespaces.join(","),
+        );
+    }
+    // docker log attrs (buildDockerLogZonecfg, VM.js:6596): zlog-mode is set
+    // for every docker zone; app-svc-dependent only for logger-backed drivers.
+    // bhyve carries its own platform-log zlog-mode in the HVM block below, so
+    // this docker zlog-mode is gated on `spec.docker` (OS brands only here).
+    if spec.docker
+        && let Some(zlog) = &spec.zlog_mode
+    {
+        z.attr("zlog-mode", zlog);
+        if spec.app_svc_dependent {
+            z.attr("app-svc-dependent", "true");
+        }
     }
     if let Some(alias) = &spec.alias {
         z.attr_base64("alias", alias);
