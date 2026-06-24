@@ -27,6 +27,7 @@ members = [
     "crates/vminfo",
     "crates/metadata",
     "crates/vmadmd",
+    "crates/fwadm",
 ]
 
 [workspace.package]
