@@ -1,0 +1,40 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+#
+# Copyright 2026 Edgecast Cloud LLC.
+
+[package]
+name = "vmadmd"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Native Rust replacement for the SmartOS node vmadmd control daemon: the custom HTTP control plane on 127.0.0.1:8080 (GET /vm/:uuid/info, POST /vm/:uuid?action=...) plus the per-HVM VNC/console TCP proxy bound to the admin IP, for the bhyve + joyent-minimal brands"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "vmadmd"
+path = "src/main.rs"
+
+[lib]
+name = "vmadmd"
+path = "src/lib.rs"
+
+[dependencies]
+tritond-cn-platform = { workspace = true }
+tritond-vmadm = { workspace = true }
+
+anyhow = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tower = { workspace = true }
