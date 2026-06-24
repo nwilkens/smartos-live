@@ -78,9 +78,6 @@ SYSINFO_MOD_DIR = $(DESTDIR)/usr/lib/sysevent/modules
 
 # These files will get run through jsstyle and jslint on 'make check'
 JS_CHECK_TARGETS=\
-	node_modules/{onlyif,net-boot-config}.js \
-	net-boot-config \
-	vm/sbin/*.js \
 	vm/node_modules/diff.js \
 	vm/node_modules/dladm.js \
 	vm/node_modules/expander.js \
@@ -99,9 +96,6 @@ JS_CHECK_TARGETS=\
 	vm/node_modules/sysevent-stream.js \
 	vm/node_modules/zonecfg.js \
 	vm/node_modules/zoneevent.js \
-	img/lib/*.js \
-	img/sbin/imgadm \
-	img/test/*.test.js \
 	vm/common/nictag.js \
 	vm/tests/common.js \
 	vm/tests/test-alias.js \
@@ -138,8 +132,7 @@ JS_CHECK_TARGETS=\
 	vm/tests/test-vminfod.js \
 	vm/tests/test-vminfod-zonewatcher.js \
 	vm/tests/test-vminfod-zonewatcher-overflow.js \
-	vm/tests/test-vminfod-zpoolwatcher.js \
-	vm/lib/metadata/*.js
+	vm/tests/test-vminfod-zpoolwatcher.js
 
 # "json.js" and the other standalone scripts (disklayout/mkzpool/filewait/
 # zoneevent/ntp_config) are now native Rust tools; nothing left to lint here.
@@ -345,13 +338,7 @@ install: all $(SUBDIRS)
 	    $(DESTDIR)/lib/svc/manifest/system/system-metadata.xml
 	cp vm/smf/system-vminfod.xml \
 	    $(DESTDIR)/lib/svc/manifest/system/system-vminfod.xml
-	# Rust replaces the Node vm/sbin tools. The staged .js files (from
-	# "cp -PR vm" above) are removed so the PI keeps only the binaries the
-	# manifest lists. (Node staging itself is removed in the next phase.)
-	rm -f $(DESTDIR)/usr/vm/sbin/vmadmd.js $(DESTDIR)/usr/vm/sbin/vmadm.js \
-	    $(DESTDIR)/usr/vm/sbin/vminfo.js $(DESTDIR)/usr/vm/sbin/vminfod.js \
-	    $(DESTDIR)/usr/vm/sbin/add-userscript.js \
-	    $(DESTDIR)/usr/vm/sbin/metadata.js
+	# Rust replaces the Node vm/sbin tools; the .js sources are gone.
 	for tool in vmadm vmadmd vminfo vminfod metadata add-userscript; do \
 		cp $(RUST_RELEASE_DIR)/$$tool $(DESTDIR)/usr/vm/sbin/$$tool; \
 		chmod 0555 $(DESTDIR)/usr/vm/sbin/$$tool; \
@@ -364,10 +351,11 @@ install: all $(SUBDIRS)
 	cp img/README.md $(DESTDIR)/usr/img/README.md
 	cp img/package.json $(DESTDIR)/usr/img/package.json
 	cp -PR img/etc $(DESTDIR)/usr/img/
-	cp -PR img/lib $(DESTDIR)/usr/img/
-	cp -PR img/node_modules $(DESTDIR)/usr/img/
 	cp -PR img/sbin $(DESTDIR)/usr/img/
-	cp -PR img/test $(DESTDIR)/usr/img/
+	# imgadm is now Rust; only the non-node test scripts ship.
+	mkdir -p $(DESTDIR)/usr/img/test
+	cp img/test/mk-custom-image img/test/runtests img/test/try-custom-image \
+	    $(DESTDIR)/usr/img/test/
 	cp $(RUST_RELEASE_DIR)/imgadm $(DESTDIR)/usr/img/sbin/imgadm
 	chmod 0555 $(DESTDIR)/usr/img/sbin/imgadm
 	rm -rf $(DESTDIR)/usr/fw
@@ -378,14 +366,17 @@ install: all $(SUBDIRS)
 	cp -Pr fw/test/node_modules $(DESTDIR)/usr/fw/test/
 	cp fw/test/runtest $(DESTDIR)/usr/fw/test/
 	cp fw/test/runtests $(DESTDIR)/usr/fw/test/
-	cp -PR fw/lib $(DESTDIR)/usr/fw/
-	cp -PR fw/node_modules $(DESTDIR)/usr/fw/
+	# fwadm is now Rust; only fw/lib/util/obj.js remains, used by the
+	# shipped fw integration tests (fw/test/lib/vm.js).
+	mkdir -p $(DESTDIR)/usr/fw/lib/util
+	cp fw/lib/util/obj.js $(DESTDIR)/usr/fw/lib/util/obj.js
 	cp -PR fw/sbin $(DESTDIR)/usr/fw/
 	cp $(RUST_RELEASE_DIR)/fwadm $(DESTDIR)/usr/fw/sbin/fwadm
 	chmod 0555 $(DESTDIR)/usr/fw/sbin/fwadm
-	cp -Pr node_modules/onlyif.js $(DESTDIR)/usr/fw/node_modules/onlyif.js
 	mkdir -m 0755 -p $(DESTDIR)/usr/lib/sdc
-	cp -p net-boot-config $(DESTDIR)/usr/lib/sdc
+	# Rust replaces the Node net-boot-config tool (same install path).
+	cp $(RUST_RELEASE_DIR)/net-boot-config $(DESTDIR)/usr/lib/sdc/net-boot-config
+	chmod 0555 $(DESTDIR)/usr/lib/sdc/net-boot-config
 	cd routeinfo && $(MAKE) install
 	cd lx_hook_postnet && $(MAKE) install
 	mkdir -p $(SYSINFO_MOD_DIR)

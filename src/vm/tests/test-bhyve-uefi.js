@@ -27,7 +27,6 @@
 var fs = require('fs');
 var VM = require('/usr/vm/node_modules/VM');
 var vmtest = require('../common/vmtest.js');
-var imgadm = require('/usr/img/lib/cli.js');
 
 // this puts test stuff in global, so we need to tell jsl about that:
 /* jsl:import ../node_modules/nodeunit-plus/index.js */

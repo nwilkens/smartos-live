@@ -115,18 +115,14 @@ function get_smbios_system_info()
         -e 's/UUID (Endian-corrected)/Fixed_UUID/')
 
     # Platforms that include illumos#13560, smbios  may emit "sanitized" strings
-    # that are not valid json. So we need to pass these through
-    # JSON.stringify.
-    eval $(/usr/node/bin/node -e '
-    console.log("Manufacturer=" + JSON.stringify("'"$Manufacturer"'"))
-    console.log("Product=" + JSON.stringify("'"$Product"'"))
-    console.log("HW_Version=" + JSON.stringify("'"$HW_Version"'"))
-    console.log("Serial_Number=" + JSON.stringify("'"$Serial_Number"'"))
-    console.log("UUID=" + JSON.stringify("'"$UUID"'"))
-    console.log("Fixed_UUID=" + JSON.stringify("'"$Fixed_UUID"'"))
-    console.log("SKU_Number=" + JSON.stringify("'"$SKU_Number"'"))
-    console.log("HW_Family=" + JSON.stringify("'"$HW_Family"'"))
-    ')
+    # that are not valid json. So we need to JSON-encode them.
+    eval "$(
+        for _k in Manufacturer Product HW_Version Serial_Number \
+            UUID Fixed_UUID SKU_Number HW_Family; do
+            eval "_v=\${$_k}"
+            echo "${_k}=$(printf '%s' "$_v" | /usr/bin/json --encode-string)"
+        done
+    )"
 
     vendor=$(smbios -t SMB_TYPE_BIOS | grep "Vendor: " \
         | sed -e 's/^.*Vendor: //;s/ *$//')
@@ -197,11 +193,8 @@ function get_smartos_cpu_info()
             CPU_Version="Unknown"
         fi
         # Platforms that include illumos#13560, smbios  may emit "sanitized"
-        # strings that are not valid json. So we need to pass these through
-        # JSON.stringify.
-        eval $(/usr/node/bin/node -e '
-            console.log("CPU_Version=" + JSON.stringify("'"$CPU_Version"'"))
-        ')
+        # strings that are not valid json. So we need to JSON-encode them.
+        eval "CPU_Version=$(printf '%s' "$CPU_Version" | /usr/bin/json --encode-string)"
 
         isainfo=$(isainfo -x)
         if [[ -n $(echo " ${isainfo} " | /usr/bin/grep " vmx ") ]]; then

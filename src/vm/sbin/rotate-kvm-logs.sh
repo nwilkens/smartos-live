@@ -47,8 +47,9 @@ function rotate_log()
     # but if we run from vmadmd or manually we want to roll forward.
     if [[ -n ${SDC_LOG_ROLL_BACKWARD} ]]; then
         deststamp=$(date +"%Y-%m-%dT%H:00:00")
-    else # roll forward
-        deststamp=$(/usr/node/bin/node -e "console.log(new Date(((new Date() / 1000) + 3600) * 1000).toISOString().split('.')[0].replace(/[0-9][0-9]:[0-9][0-9]$/, '00:00'))")
+    else # roll forward: next hour in UTC, minutes/seconds zeroed.
+        # POSIX TZ inverts the sign, so "UTC-1" displays UTC+1h.
+        deststamp=$(TZ="UTC-1" date +"%Y-%m-%dT%H:00:00")
     fi
     destfile="${DEST_DIR}/qemu_${vm_uuid}@${SERVER_UUID}_${deststamp}.log"
 

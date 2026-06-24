@@ -32,6 +32,7 @@ struct Opts {
     merge: Option<Merge>,
     input_files: Vec<String>,
     validate: bool,
+    encode_string: bool,
     args: Vec<String>,
 }
 
@@ -54,6 +55,7 @@ impl Default for Opts {
             merge: None,
             input_files: Vec::new(),
             validate: false,
+            encode_string: false,
             args: Vec::new(),
         }
     }
@@ -76,6 +78,16 @@ fn main() -> ExitCode {
     if opts.version {
         println!("json {VERSION}");
         return ExitCode::SUCCESS;
+    }
+
+    if opts.encode_string {
+        return match encode_string(&opts) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("json: error: {e}");
+                ExitCode::from(1)
+            }
+        };
     }
 
     match run(&opts) {
@@ -171,6 +183,10 @@ fn parse_argv(argv: &[String]) -> Result<Opts, String> {
             "--deep-merge" => opts.merge = Some(Merge::Deep),
             "-f" => opts.input_files.push(it.next().unwrap_or_default()),
             "--validate" => opts.validate = true,
+            // SmartOS extension: emit the raw input as a JSON string literal,
+            // byte-identical to node's JSON.stringify(rawString). Replaces the
+            // `node -e 'console.log(JSON.stringify(...))'` calls in the PI.
+            "--encode-string" => opts.encode_string = true,
             other => {
                 if !end_of_options && other.starts_with('-') && !other.is_empty() {
                     return Err(format!("unknown option '{other}'"));
@@ -209,6 +225,35 @@ fn parse_string(s: &str) -> String {
         }
     }
     out
+}
+
+// --encode-string: read raw input verbatim (no HTTP-header strip, no JSON
+// parse) and print it as a JSON string literal followed by a newline. Output
+// is byte-identical to node's `console.log(JSON.stringify(rawString))`.
+// Invalid UTF-8 is decoded lossily (U+FFFD), matching how shell byte strings
+// surface as JS strings; serde_json then emits the same escaping as
+// JSON.stringify for every code point (quote, backslash, control chars,
+// and unicode passed through unescaped).
+fn json_string_literal(s: &str) -> String {
+    output::render(Some(&Value::String(s.to_string())), OutputMode::Json, 0)
+        .unwrap_or_else(|| "\"\"".to_string())
+}
+
+fn encode_string(opts: &Opts) -> io::Result<ExitCode> {
+    let mut bytes = Vec::new();
+    if opts.input_files.is_empty() {
+        io::stdin().read_to_end(&mut bytes)?;
+    } else {
+        for f in &opts.input_files {
+            bytes.extend_from_slice(&std::fs::read(f)?);
+        }
+    }
+    let s = String::from_utf8_lossy(&bytes);
+    let literal = json_string_literal(&s);
+    let mut stdout = io::stdout();
+    stdout.write_all(literal.as_bytes())?;
+    stdout.write_all(b"\n")?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn read_input(opts: &Opts) -> io::Result<String> {
@@ -531,4 +576,34 @@ fn emit_output(
 fn print_help() {
     // Byte-exact copy of the node tool's help output.
     print!("{}", include_str!("help.txt"));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::json_string_literal;
+
+    // Each case mirrors node's JSON.stringify(input) exactly.
+    #[test]
+    fn encode_matches_json_stringify() {
+        assert_eq!(json_string_literal(""), "\"\"");
+        assert_eq!(json_string_literal("plain"), "\"plain\"");
+        assert_eq!(json_string_literal("a\"b"), "\"a\\\"b\"");
+        assert_eq!(json_string_literal("a\\b"), "\"a\\\\b\"");
+        assert_eq!(json_string_literal("a\nb"), "\"a\\nb\"");
+        assert_eq!(json_string_literal("a\tb"), "\"a\\tb\"");
+        assert_eq!(json_string_literal("a\rb"), "\"a\\rb\"");
+        // \b (0x08) and \f (0x0c) short escapes.
+        assert_eq!(json_string_literal("\u{0008}"), "\"\\b\"");
+        assert_eq!(json_string_literal("\u{000c}"), "\"\\f\"");
+        // Other control chars -> \u00XX lowercase hex.
+        assert_eq!(json_string_literal("\u{0001}"), "\"\\u0001\"");
+        assert_eq!(json_string_literal("\u{001f}"), "\"\\u001f\"");
+        // Forward slash is NOT escaped (matches JSON.stringify).
+        assert_eq!(json_string_literal("a/b"), "\"a/b\"");
+        // Unicode passes through unescaped.
+        assert_eq!(json_string_literal("café"), "\"café\"");
+        assert_eq!(json_string_literal("日本"), "\"日本\"");
+        // U+2028/U+2029 pass through (JSON.stringify does not escape them).
+        assert_eq!(json_string_literal("\u{2028}"), "\"\u{2028}\"");
+    }
 }

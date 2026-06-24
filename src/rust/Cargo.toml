@@ -30,6 +30,7 @@ members = [
     "crates/fwadm",
     "crates/imgapi-manifest",
     "crates/imgadm",
+    "crates/net-boot-config",
 ]
 
 [workspace.package]

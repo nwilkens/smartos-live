@@ -10,22 +10,7 @@ d usr/img/lib 0555 root bin
 s usr/img/lib/64=amd64
 d usr/img/lib/amd64 0555 root bin
 f usr/img/lib/amd64/nomknod.so 0755 root bin
-f usr/img/lib/IMG.js 0444 root bin
-f usr/img/lib/cli.js 0444 root bin
-f usr/img/lib/common.js 0444 root bin
-f usr/img/lib/configuration.js 0444 root bin
-f usr/img/lib/database.js 0444 root bin
-f usr/img/lib/errors.js 0444 root bin
-f usr/img/lib/imgadm.js 0444 root bin
-f usr/img/lib/magic.js 0444 root bin
 f usr/img/lib/nomknod.so 0755 root bin
-d usr/img/lib/sources 0555 root bin
-f usr/img/lib/sources/docker.js 0444 root bin
-f usr/img/lib/sources/dsapi.js 0444 root bin
-f usr/img/lib/sources/imgapi.js 0444 root bin
-f usr/img/lib/sources/index.js 0444 root bin
-f usr/img/lib/sources/source.js 0444 root bin
-f usr/img/lib/upgrade.js 0444 root bin
 f usr/img/package.json 0444 root bin
 d usr/img/sbin 0555 root bin
 f usr/img/sbin/chroot-gtar 0555 root bin
@@ -33,16 +18,9 @@ f usr/img/sbin/gtar-unlink-dir 0555 root bin
 f usr/img/sbin/recover-vm-from-failed-imgadm-create.sh 0555 root bin
 f usr/img/sbin/imgadm 0555 root bin
 d usr/img/test 0555 root bin
-f usr/img/test/IMG.test.js 0444 root bin
-f usr/img/test/basics.test.js 0444 root bin
-f usr/img/test/create.test.js 0444 root bin
-f usr/img/test/docker.test.js 0444 root bin
-f usr/img/test/import.test.js 0444 root bin
 f usr/img/test/mk-custom-image 0555 root bin
 f usr/img/test/runtests 0555 root bin
-f usr/img/test/tap4nodeunit.js 0444 root bin
 f usr/img/test/try-custom-image 0555 root bin
-f usr/img/test/update.test.js 0444 root bin
 d var/db 0755 root sys
 d var/db/imgadm 0755 root bin
 
@@ -93,18 +71,9 @@ d usr/fw/lib 0555 root bin
 d usr/fw/lib/util 0555 root bin
 d usr/fw/sbin 0555 root bin
 f usr/fw/etc/fwadm.completion 0444 root bin
-f usr/fw/lib/cli.js 0444 root bin
-f usr/fw/lib/filter.js 0444 root bin
-f usr/fw/lib/fw.js 0444 root bin
-f usr/fw/lib/fwadm.js 0444 root bin
-f usr/fw/lib/ipf.js 0444 root bin
-f usr/fw/lib/locker.js 0444 root bin
-f usr/fw/lib/pipeline.js 0444 root bin
-f usr/fw/lib/rvm.js 0444 root bin
-f usr/fw/lib/util/errors.js 0444 root bin
-f usr/fw/lib/util/log.js 0444 root bin
+# fw/lib/util/obj.js is still required by the shipped fw integration tests
+# (usr/fw/test/lib/vm.js -> ../../lib/util/obj); fwadm itself is now Rust.
 f usr/fw/lib/util/obj.js 0444 root bin
-f usr/fw/lib/util/vm.js 0444 root bin
 f usr/fw/sbin/fwadm 0555 root bin
 d usr/fw/test 0555 root bin
 d usr/fw/test/integration 0555 root bin
@@ -117,11 +86,6 @@ f usr/fw/test/lib/log.js 0444 root root
 f usr/fw/test/lib/vm.js 0444 root root
 d var/fw 0755 root bin
 # metadata daemon
-d usr/vm/lib 0555 root bin
-d usr/vm/lib/metadata 0555 root bin
-f usr/vm/lib/metadata/common.js 0444 root bin
-f usr/vm/lib/metadata/crc32.js 0444 root bin
-f usr/vm/lib/metadata/agent.js 0444 root bin
 f usr/vm/sbin/metadata 0555 root bin
 f usr/vm/smf/system-metadata 0555 root bin
 f lib/svc/manifest/system/system-metadata.xml 0444 root bin

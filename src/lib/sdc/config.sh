@@ -263,7 +263,7 @@ if [[ $1 == "-json" ]]; then
                 # If this is the admin password, it may contain special
                 # characters that need to be stringified properly.
                 elif [[ ${key} == "ufds_admin_pw" ]]; then
-                    j_val="$(value="$value" /usr/node/bin/node -e 'console.log(JSON.stringify(process.env["value"]))')"
+                    j_val="$(printf '%s' "$value" | /usr/bin/json --encode-string)"
                     printf '  , "%s": %s\n' "${key}" "${j_val}"
                 else
                     echo "  , \"${key}\": \"${value}\""

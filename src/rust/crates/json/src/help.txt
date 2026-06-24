@@ -93,6 +93,8 @@ Options:
   -k, --keys    Output the input object's keys.
   --validate    Just validate the input (no processing or output).
                 Use with '-q' for silent validation (exit status).
+  --encode-string  Encode raw (non-JSON) input as a JSON string literal.
+                   Equivalent to JSON.stringify(rawString).
 
   -o, --output MODE   Specify an output mode. One of
                   jsony (default): JSON with string quotes elided
