@@ -1,0 +1,20 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+[package]
+name = "ntp_config"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Native Rust drop-in for the SmartOS smartdc ntp_config tool (generates /etc/inet/ntp.conf)"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ntp_config"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }

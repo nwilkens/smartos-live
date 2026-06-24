@@ -110,6 +110,7 @@ mod tests {
             state: "running".to_string(),
             brand: brand.to_string(),
             zonepath: format!("/zones/{}", uuid()),
+            zonedid: Some(7),
         }
     }
 

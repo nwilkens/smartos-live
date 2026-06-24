@@ -319,6 +319,7 @@ mod tests {
                 state: "running".to_string(),
                 brand: "bhyve".to_string(),
                 zonepath: format!("/zones/{u}"),
+                zonedid: Some(3),
             },
         );
         host.set_export(u, bhyve_export());

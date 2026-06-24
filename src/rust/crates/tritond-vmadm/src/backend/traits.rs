@@ -55,6 +55,40 @@ pub struct ZoneRuntime {
     pub state: String,
     pub brand: String,
     pub zonepath: String,
+    /// Zone debug id (`zoneadm list -p` field 8), `None` when not running.
+    pub zonedid: Option<i64>,
+}
+
+/// The per-zone running facts node reads from the `zones:::zone_misc` kstat.
+/// Only available for a `running` zone.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ZoneKstat {
+    /// `init_pid` (node `pid`).
+    pub init_pid: Option<i64>,
+    /// `init_restarts`.
+    pub init_restarts: Option<u64>,
+    /// `boot_time` as a unix timestamp in seconds (node `boot_timestamp`).
+    pub boot_time: Option<i64>,
+}
+
+/// Host-wide facts node pulls from `sysinfo` for every VM object.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HostFacts {
+    /// sysinfo `UUID` (node `server_uuid`).
+    pub server_uuid: Option<Uuid>,
+    /// sysinfo `Live Image` (node `platform_buildstamp`).
+    pub platform_buildstamp: Option<String>,
+}
+
+/// One zoneroot snapshot from `zfs list -t snapshot`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotInfo {
+    /// Full snapshot name (`<dataset>@<snapname>`).
+    pub name: String,
+    /// `used` in bytes.
+    pub used: u64,
+    /// `creation` as a unix timestamp in seconds.
+    pub creation: i64,
 }
 
 impl ZoneRuntime {
@@ -175,6 +209,18 @@ pub trait ZoneHost: Send + Sync {
         dataset: &str,
         props: &[&str],
     ) -> Result<std::collections::BTreeMap<String, String>>;
+
+    /// The `zones:::zone_misc` kstat facts for a running zone (`pid`,
+    /// `init_restarts`, `boot_time`). An empty [`ZoneKstat`] for a zone with
+    /// no kstat (not running) is fine; node simply omits those fields then.
+    async fn zone_kstat(&self, zoneid: i64, zonename: &str) -> Result<ZoneKstat>;
+
+    /// Host-wide `sysinfo` facts (`server_uuid`, `platform_buildstamp`).
+    async fn host_facts(&self) -> Result<HostFacts>;
+
+    /// `zfs list -Hpt snapshot -o name,used,creation -r <dataset>` — the
+    /// zoneroot's snapshots (node filters to the `vmsnap-` prefix).
+    async fn zfs_list_snapshots(&self, dataset: &str) -> Result<Vec<SnapshotInfo>>;
 }
 
 /// Registers a NIC's host link as a SmartOS nic_tag so the zone brand's

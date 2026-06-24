@@ -13,6 +13,6 @@ pub mod nic;
 pub mod spec;
 
 pub use disk::{DiskMedia, DiskModel, DiskSpec, Refreservation};
-pub use get_json::{DiskJson, NicJson, VmGetJson};
+pub use get_json::{DiskJson, NicJson, SnapshotJson, VmGetJson};
 pub use nic::{NicAddr, NicSpec, fix_mac, ruin_mac};
 pub use spec::{JsonMap, VmCreateSpec};

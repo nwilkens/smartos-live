@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use crate::backend::traits::{ZoneHost, ZoneRuntime};
 use crate::error::Result;
-use crate::model::get_json::{DiskJson, NicJson, VmGetJson};
+use crate::model::get_json::{DiskJson, NicJson, SnapshotJson, VmGetJson};
 use crate::model::nic::fix_mac;
 use crate::model::spec::JsonMap;
 
@@ -80,7 +80,11 @@ async fn reconstruct<H: ZoneHost>(host: &H, uuid: Uuid, info: ZoneRuntime) -> Re
         parsed.zonepath.clone()
     };
     vm.zoneid = info.zoneid;
+    vm.zonedid = info.zonedid;
     vm.autoboot = parsed.autoboot;
+    // node: hvm = HVM_BRANDS.indexOf(brand) >= 0 (bhyve/kvm).
+    let is_hvm = vm.brand == "bhyve" || vm.brand == "kvm";
+    vm.hvm = is_hvm;
 
     // attrs that map to top-level fields.
     vm.alias = parsed.alias;
@@ -88,15 +92,24 @@ async fn reconstruct<H: ZoneHost>(host: &H, uuid: Uuid, info: ZoneRuntime) -> Re
     vm.dns_domain = parsed.attrs.get("dns-domain").cloned();
     vm.owner_uuid = parsed.attrs.get("owner-uuid").and_then(|s| s.parse().ok());
     vm.billing_id = parsed.attrs.get("billing-id").and_then(|s| s.parse().ok());
+    // node maps the `dataset-uuid` attr to `image_uuid`.
+    vm.image_uuid = parsed
+        .attrs
+        .get("dataset-uuid")
+        .and_then(|s| s.parse().ok());
     vm.create_timestamp = parsed
         .attrs
         .get("create-timestamp")
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&chrono::Utc));
-    vm.do_not_inventory = parsed
+    // node always emits firewall_enabled (false when the attr is unset).
+    vm.firewall_enabled = parsed
         .attrs
-        .get("do-not-inventory")
+        .get("firewall-enabled")
         .is_some_and(|v| v == "true");
+    vm.limit_priv = parsed.limit_priv.clone();
+    vm.v = parsed.attrs.get("vm-version").and_then(|s| s.parse().ok());
+    vm.tmpfs = parsed.attrs.get("tmpfs").and_then(|s| s.parse().ok());
     if let Some(resolvers) = parsed.attrs.get("resolvers") {
         vm.resolvers = resolvers
             .split(',')
@@ -106,14 +119,47 @@ async fn reconstruct<H: ZoneHost>(host: &H, uuid: Uuid, info: ZoneRuntime) -> Re
     }
     vm.ram = parsed.attrs.get("ram").and_then(|s| s.parse().ok());
     vm.vcpus = parsed.attrs.get("vcpus").and_then(|s| s.parse().ok());
-    vm.flexible_disk_size = parsed
-        .attrs
-        .get("flexible-disk-size")
-        .and_then(|s| s.parse().ok())
+
+    // rctl-derived resource controls. node `numberify`s the count rctls and
+    // `unmangleMem`s (bytes -> MiB) the memory ones.
+    let rctl = |name: &str| parsed.rctls.get(name).copied();
+    let rctl_mib = |name: &str| rctl(name).map(|b| b / (1024 * 1024));
+    vm.cpu_shares = rctl("zone.cpu-shares");
+    vm.cpu_cap = rctl("zone.cpu-cap");
+    vm.zfs_io_priority = rctl("zone.zfs-io-priority");
+    vm.max_lwps = rctl("zone.max-lwps");
+    vm.max_msg_ids = rctl("zone.max-msg-ids");
+    vm.max_sem_ids = rctl("zone.max-sem-ids");
+    vm.max_shm_ids = rctl("zone.max-shm-ids");
+    vm.max_shm_memory = rctl_mib("zone.max-shm-memory");
+    vm.max_locked_memory = rctl_mib("zone.max-locked-memory");
+    vm.max_swap = rctl_mib("zone.max-swap");
+    // max_physical_memory: prefer the rctl (matches node), then the
+    // capped-memory block on a non-running export.
+    vm.max_physical_memory = rctl_mib("zone.max-physical-memory")
+        .or(parsed.capped_physical_mib)
         .unwrap_or(0);
 
-    vm.max_physical_memory = parsed.capped_physical_mib.unwrap_or(0);
     vm.nics = parsed.nics;
+
+    // node emits flexible_disk_size only for HVM zones.
+    if is_hvm {
+        vm.flexible_disk_size = Some(
+            parsed
+                .attrs
+                .get("flexible-disk-size")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
+        );
+    }
+    // node only surfaces do_not_inventory when the attr is set true.
+    if parsed
+        .attrs
+        .get("do-not-inventory")
+        .is_some_and(|v| v == "true")
+    {
+        vm.do_not_inventory = Some(true);
+    }
 
     // config files (best-effort: an absent file is an empty map, matching a
     // freshly-installed zone before any metadata is written).
@@ -123,11 +169,34 @@ async fn reconstruct<H: ZoneHost>(host: &H, uuid: Uuid, info: ZoneRuntime) -> Re
     vm.tags = read_config_map(&zonepath.join("config/tags.json")).await;
     vm.routes = read_config_map(&zonepath.join("config/routes.json")).await;
 
-    // quota (GiB) from zfs. The zoneroot dataset is the zonepath sans slash.
-    let dataset = vm.zonepath.trim_start_matches('/');
+    // last_modified: newest mtime of the config files + /etc/zones xml,
+    // matching node's getLastModified().
+    vm.last_modified = newest_mtime(zonepath, &vm.zonename).await;
+
+    // sysinfo facts: server_uuid + platform_buildstamp.
+    if let Ok(facts) = host.host_facts().await {
+        vm.server_uuid = facts.server_uuid;
+        vm.platform_buildstamp = facts.platform_buildstamp;
+    }
+
+    // kstat facts (running zones only): pid / init_restarts / boot_timestamp.
+    if info.state == "running"
+        && let Some(zoneid) = info.zoneid
+        && let Ok(k) = host.zone_kstat(zoneid, &vm.zonename).await
+    {
+        vm.pid = k.init_pid;
+        vm.init_restarts = k.init_restarts;
+        vm.boot_timestamp = k
+            .boot_time
+            .and_then(|secs| chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0));
+    }
+
+    // quota + zfs root dataset facts. The zoneroot dataset is the zonepath
+    // sans leading slash.
+    let dataset = vm.zonepath.trim_start_matches('/').to_string();
     if !dataset.is_empty() {
         let props = host
-            .zfs_get_props(dataset, &["quota", "refquota"])
+            .zfs_get_props(&dataset, &["quota", "refquota", "recordsize"])
             .await
             .unwrap_or_default();
         // bhyve sets refquota on the zoneroot; OS zones set quota. `zfs
@@ -143,24 +212,83 @@ async fn reconstruct<H: ZoneHost>(host: &H, uuid: Uuid, info: ZoneRuntime) -> Re
             .or_else(|| pick("quota"))
             .map(bytes_to_gib)
             .unwrap_or(0);
+        vm.zfs_root_recsize = props.get("recordsize").and_then(|s| s.parse().ok());
+        vm.zfs_filesystem = Some(dataset.clone());
+        vm.zpool = dataset.split('/').next().map(str::to_string);
     }
+
+    // snapshots: node exposes the zoneroot's `vmsnap-` snapshots in a
+    // friendly form, newest first.
+    vm.snapshots = collect_snapshots(host, &dataset).await;
 
     // disks: only HVM (bhyve) zones have zvol-backed disks. Enrich the
     // zonecfg device blocks with each zvol's refreservation from zfs.
-    for dev in &parsed.devices {
-        let mut disk = device_to_disk(dev);
-        if let Some(ds) = &disk.zfs_filesystem
-            && let Ok(props) = host.zfs_get_props(ds, &["refreservation"]).await
-        {
-            disk.refreservation = props
-                .get("refreservation")
-                .and_then(|s| s.parse::<u64>().ok())
-                .filter(|b| *b > 0);
+    if is_hvm {
+        let mut disks = Vec::new();
+        for dev in &parsed.devices {
+            let mut disk = device_to_disk(dev);
+            if let Some(ds) = &disk.zfs_filesystem
+                && let Ok(props) = host.zfs_get_props(ds, &["refreservation"]).await
+            {
+                disk.refreservation = props
+                    .get("refreservation")
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .filter(|b| *b > 0);
+            }
+            disks.push(disk);
         }
-        vm.disks.push(disk);
+        vm.disks = Some(disks);
     }
 
     Ok(vm)
+}
+
+/// Collect the zoneroot's `vmsnap-`-prefixed snapshots in the friendly form
+/// node's `addSnapshots` exposes (name without prefix, size in MiB, created
+/// timestamp), sorted newest-first.
+async fn collect_snapshots<H: ZoneHost>(host: &H, dataset: &str) -> Vec<SnapshotJson> {
+    if dataset.is_empty() {
+        return Vec::new();
+    }
+    let Ok(snaps) = host.zfs_list_snapshots(dataset).await else {
+        return Vec::new();
+    };
+    let prefix = format!("{dataset}@vmsnap-");
+    let mut out: Vec<SnapshotJson> = snaps
+        .into_iter()
+        .filter_map(|s| {
+            let name = s.name.strip_prefix(&prefix)?.to_string();
+            Some(SnapshotJson {
+                name,
+                size: s.used / (1024 * 1024),
+                created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(s.creation, 0),
+            })
+        })
+        .collect();
+    out.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+    out
+}
+
+/// Newest mtime across the config JSON files + the zone XML, as node's
+/// `getLastModified()` computes `last_modified`. `None` if none exist.
+async fn newest_mtime(zonepath: &Path, zonename: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let files = [
+        zonepath.join("config/metadata.json"),
+        zonepath.join("config/routes.json"),
+        zonepath.join("config/tags.json"),
+        zonepath.join("lastexited"),
+        Path::new("/etc/zones").join(format!("{zonename}.xml")),
+    ];
+    let mut newest: Option<std::time::SystemTime> = None;
+    for f in files {
+        if let Ok(meta) = tokio::fs::metadata(&f).await
+            && meta.is_file()
+            && let Ok(mtime) = meta.modified()
+        {
+            newest = Some(newest.map_or(mtime, |cur| cur.max(mtime)));
+        }
+    }
+    newest.map(chrono::DateTime::<chrono::Utc>::from)
 }
 
 /// Map a zoneadm runtime state to the vmadm-normalized state node reports.
@@ -262,10 +390,15 @@ struct ParsedExport {
     brand: String,
     zonepath: String,
     autoboot: bool,
+    /// `set limitpriv=...` top-level scalar (node `limit_priv`).
+    limit_priv: Option<String>,
     /// `attr` name → value (string attrs only; node stores everything as a
     /// `type=string` attr).
     attrs: BTreeMap<String, String>,
     alias: Option<String>,
+    /// `zone.<rctl>` name → privileged limit (raw, in the rctl's own units:
+    /// bytes for memory rctls, a bare count otherwise).
+    rctls: BTreeMap<String, u64>,
     /// `capped-memory`'s `physical` in MiB.
     capped_physical_mib: Option<u64>,
     nics: Vec<NicJson>,
@@ -312,6 +445,7 @@ impl ParsedExport {
                     "brand" => p.brand = v,
                     "zonepath" => p.zonepath = v,
                     "autoboot" => p.autoboot = v == "true",
+                    "limitpriv" => p.limit_priv = Some(v),
                     _ => {}
                 }
             }
@@ -361,17 +495,18 @@ impl ParsedExport {
                 self.capped_physical_mib =
                     res.scalars.get("physical").and_then(|s| parse_size_mib(s));
             }
-            // On a `zonecfg export` the capped-memory physical surfaces as
-            // the `zone.max-physical-memory` rctl (bytes); convert to MiB.
-            "rctl"
-                if res.scalars.get("name").map(String::as_str)
-                    == Some("zone.max-physical-memory") =>
-            {
-                self.capped_physical_mib = res
-                    .scalars
-                    .get("rctl-limit")
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(|bytes| bytes / 1024 / 1024);
+            // Every `add rctl` block: store its privileged limit verbatim so
+            // the caller can apply node's per-rctl unit translation. The
+            // limit is in the rctl's own units (bytes for memory rctls).
+            "rctl" => {
+                if let (Some(name), Some(limit)) = (
+                    res.scalars.get("name"),
+                    res.scalars
+                        .get("rctl-limit")
+                        .and_then(|s| s.parse::<u64>().ok()),
+                ) {
+                    self.rctls.insert(name.clone(), limit);
+                }
             }
             _ => {}
         }
@@ -514,6 +649,7 @@ mod tests {
             state: state.to_string(),
             brand: brand.to_string(),
             zonepath: format!("/zones/{}", uuid()),
+            zonedid: Some(7),
         }
     }
 
@@ -695,8 +831,8 @@ mod tests {
             )
         );
         assert_eq!(vm.resolvers, vec!["10.199.199.14".to_string()]);
-        // OS zones have no zvol disks.
-        assert!(vm.disks.is_empty());
+        // node omits `disks` entirely for OS zones.
+        assert!(vm.disks.is_none());
         // one NIC, mac re-padded to canonical form.
         assert_eq!(vm.nics.len(), 1);
         assert_eq!(vm.nics[0].interface, "net0");
@@ -738,15 +874,19 @@ mod tests {
         let vm = get(&host, uuid()).await.expect("get").expect("some");
 
         assert_eq!(vm.brand, "bhyve");
+        assert!(vm.hvm);
         assert_eq!(vm.ram, Some(2048));
         assert_eq!(vm.vcpus, Some(2));
-        assert_eq!(vm.flexible_disk_size, 20480);
+        assert_eq!(vm.flexible_disk_size, Some(20480));
+        // do_not_inventory is omitted unless the attr is set true.
+        assert_eq!(vm.do_not_inventory, None);
         assert_eq!(vm.max_physical_memory, 3072);
         // refquota wins for the bhyve pool ceiling.
         assert_eq!(vm.quota, 30);
 
-        assert_eq!(vm.disks.len(), 1);
-        let d = &vm.disks[0];
+        let disks = vm.disks.as_ref().expect("hvm disks present");
+        assert_eq!(disks.len(), 1);
+        let d = &disks[0];
         assert_eq!(d.path, format!("/dev/zvol/dsk/zones/{}/disk0", uuid()));
         assert_eq!(
             d.zfs_filesystem.as_deref(),

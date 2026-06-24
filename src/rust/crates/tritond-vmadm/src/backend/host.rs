@@ -21,7 +21,8 @@ use tritond_cn_platform::smartos::zoneadm::{ZoneadmError, ZoneadmTool};
 use uuid::Uuid;
 
 use crate::backend::traits::{
-    InstallArgs, NicTagRegistrar, ProvisionOutcome, ZoneHost, ZoneRef, ZoneRuntime,
+    HostFacts, InstallArgs, NicTagRegistrar, ProvisionOutcome, SnapshotInfo, ZoneHost, ZoneKstat,
+    ZoneRef, ZoneRuntime,
 };
 use crate::error::{Result, VmadmError};
 
@@ -30,6 +31,7 @@ const ZONEADM: &str = "/usr/sbin/zoneadm";
 const ZFS: &str = "/usr/sbin/zfs";
 const SVCCFG: &str = "/usr/sbin/svccfg";
 const NICTAGADM: &str = "/usr/bin/nictagadm";
+const KSTAT: &str = "/usr/bin/kstat";
 
 /// Production host backend.
 #[derive(Debug, Clone, Default)]
@@ -286,16 +288,43 @@ impl ZoneHost for HostBackend {
     }
 
     async fn zone_info(&self, uuid: Uuid) -> Result<Option<ZoneRuntime>> {
-        match ZoneadmTool::new().lookup(&uuid.to_string()).await {
-            Ok(z) => Ok(Some(ZoneRuntime {
-                zoneid: z.zoneid,
-                state: z.state,
-                brand: z.brand,
-                zonepath: z.zonepath.to_string_lossy().into_owned(),
-            })),
-            Err(ZoneadmError::NotFound { .. }) => Ok(None),
-            Err(e) => Err(e.into()),
+        // `ZoneadmTool::lookup` parses the first six fields but drops the
+        // optional `zonedid` (field 8). node reads it for the `zonedid`
+        // property, so re-run `zoneadm list -p` here and parse the full line.
+        let out = run(
+            ZONEADM,
+            &["-z", &uuid.to_string(), "-u", &uuid.to_string(), "list", "-p"],
+            None,
+            &[],
+            &["No such zone configured", "could not find zone"],
+        )
+        .await;
+        let line = match out {
+            Ok(s) => s.lines().find(|l| !l.trim().is_empty()).map(str::to_string),
+            Err(VmadmError::NonZeroExit { stderr, .. })
+                if stderr.contains("No such zone configured")
+                    || stderr.contains("could not find zone") =>
+            {
+                None
+            }
+            Err(e) => return Err(e),
+        };
+        let Some(line) = line else { return Ok(None) };
+        let fields: Vec<&str> = line.trim_end().split(':').collect();
+        if fields.len() < 6 {
+            return Ok(None);
         }
+        let parse_id = |s: &str| match s {
+            "-" | "" => None,
+            other => other.parse::<i64>().ok().filter(|n| *n != -1),
+        };
+        Ok(Some(ZoneRuntime {
+            zoneid: parse_id(fields[0]),
+            state: fields[2].to_string(),
+            zonepath: fields[3].to_string(),
+            brand: fields[5].to_string(),
+            zonedid: fields.get(7).and_then(|f| parse_id(f)),
+        }))
     }
 
     async fn list_zone_uuids(&self) -> Result<Vec<Uuid>> {
@@ -379,6 +408,87 @@ impl ZoneHost for HostBackend {
                 let p = f.next()?.to_string();
                 let v = f.next()?.to_string();
                 Some((p, v))
+            })
+            .collect())
+    }
+
+    async fn zone_kstat(&self, zoneid: i64, zonename: &str) -> Result<ZoneKstat> {
+        // node reads these from the zones:::zone_misc kstat. We parse
+        // `kstat -p zones:<id>:` and match the `zonename` data field, since
+        // the kstat instance name is truncated to 30 chars.
+        let stat = run(KSTAT, &["-p", &format!("zones:{zoneid}:")], None, &[], &[]).await?;
+        let mut k = ZoneKstat::default();
+        let mut matched = false;
+        let mut fields: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for line in stat.lines() {
+            let Some((key, val)) = line.rsplit_once('\t') else {
+                continue;
+            };
+            let Some(field) = key.rsplit(':').next() else {
+                continue;
+            };
+            fields.insert(field, val.trim());
+        }
+        if fields.get("zonename") == Some(&zonename) {
+            matched = true;
+        }
+        if matched {
+            k.init_pid = fields.get("init_pid").and_then(|v| v.parse().ok());
+            k.init_restarts = fields.get("init_restarts").and_then(|v| v.parse().ok());
+            k.boot_time = fields.get("boot_time").and_then(|v| v.parse().ok());
+        }
+        Ok(k)
+    }
+
+    async fn host_facts(&self) -> Result<HostFacts> {
+        // node reads sysinfo's cache file /tmp/.sysinfo.json. Fall back to
+        // invoking sysinfo if the cache is missing.
+        let raw = match tokio::fs::read("/tmp/.sysinfo.json").await {
+            Ok(bytes) => bytes,
+            Err(_) => run("/usr/bin/sysinfo", &[], None, &[], &[])
+                .await?
+                .into_bytes(),
+        };
+        let v: serde_json::Value = serde_json::from_slice(&raw)
+            .map_err(|e| VmadmError::Payload(format!("parse sysinfo: {e}")))?;
+        Ok(HostFacts {
+            server_uuid: v.get("UUID").and_then(|s| s.as_str()).and_then(|s| s.parse().ok()),
+            platform_buildstamp: v
+                .get("Live Image")
+                .and_then(|s| s.as_str())
+                .map(str::to_string),
+        })
+    }
+
+    async fn zfs_list_snapshots(&self, dataset: &str) -> Result<Vec<SnapshotInfo>> {
+        let out = run(
+            ZFS,
+            &[
+                "list",
+                "-Hpt",
+                "snapshot",
+                "-o",
+                "name,used,creation",
+                "-r",
+                dataset,
+            ],
+            None,
+            &[],
+            &["does not exist", "dataset does not exist"],
+        )
+        .await?;
+        Ok(out
+            .lines()
+            .filter_map(|line| {
+                let mut f = line.split('\t');
+                let name = f.next()?.to_string();
+                let used = f.next()?.parse::<u64>().ok()?;
+                let creation = f.next()?.parse::<i64>().ok()?;
+                Some(SnapshotInfo {
+                    name,
+                    used,
+                    creation,
+                })
             })
             .collect())
     }

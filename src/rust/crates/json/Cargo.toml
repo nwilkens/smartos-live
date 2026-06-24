@@ -1,0 +1,22 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+[package]
+name = "json"
+version = "5.1.1"
+edition.workspace = true
+license.workspace = true
+description = "Native Rust drop-in for the SmartOS json(1) CLI (trentm/json 5.1.1 surface)"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "json"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+boa_engine = { workspace = true }

@@ -16,7 +16,8 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::backend::traits::{
-    InstallArgs, NicTagRegistrar, ProvisionOutcome, ZoneHost, ZoneRef, ZoneRuntime,
+    HostFacts, InstallArgs, NicTagRegistrar, ProvisionOutcome, SnapshotInfo, ZoneHost, ZoneKstat,
+    ZoneRef, ZoneRuntime,
 };
 use crate::error::{Result, VmadmError};
 
@@ -240,6 +241,7 @@ impl ZoneHost for FakeHost {
                 state: "running".to_string(),
                 brand: "joyent-minimal".to_string(),
                 zonepath: format!("/zones/{uuid}"),
+                zonedid: Some(1),
             }));
         }
         Ok(None)
@@ -277,6 +279,21 @@ impl ZoneHost for FakeHost {
             .get(dataset)
             .cloned()
             .unwrap_or_default())
+    }
+
+    async fn zone_kstat(&self, zoneid: i64, _zonename: &str) -> Result<ZoneKstat> {
+        self.record(format!("zone_kstat {zoneid}"))?;
+        Ok(ZoneKstat::default())
+    }
+
+    async fn host_facts(&self) -> Result<HostFacts> {
+        self.record("host_facts")?;
+        Ok(HostFacts::default())
+    }
+
+    async fn zfs_list_snapshots(&self, dataset: &str) -> Result<Vec<SnapshotInfo>> {
+        self.record(format!("zfs list snapshots {dataset}"))?;
+        Ok(Vec::new())
     }
 
     async fn svccfg_mdata_exec_timeout(&self, zonepath: &str, secs: u64) -> Result<()> {

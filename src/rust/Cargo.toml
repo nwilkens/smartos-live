@@ -15,6 +15,14 @@ members = [
     "crates/tritond-cn-platform",
     "crates/tritond-vmadm",
     "crates/vmadm",
+    "crates/json",
+    "crates/bunyan",
+    "crates/disklayout",
+    "crates/mkzpool",
+    "crates/filewait",
+    "crates/zoneevent",
+    "crates/ntp_config",
+    "crates/add-userscript",
 ]
 
 [workspace.package]
@@ -44,8 +52,12 @@ ipnetwork = { version = "0.21", default-features = false, features = ["serde"] }
 libc = "0.2"
 notify = "8.2"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# preserve_order is load-bearing: json/bunyan/add-userscript reproduce
+# node's object key ordering, which requires insertion-order maps.
+serde_json = { version = "1.0", features = ["preserve_order"] }
 thiserror = "2.0"
+# JS expression evaluation for `json -e`/`-c` (the only consumer).
+boa_engine = "0.20"
 tokio = { version = "1.48", features = ["full"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }

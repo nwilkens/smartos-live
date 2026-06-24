@@ -76,25 +76,34 @@ pub fn field_value(vm: &VmGetJson, field: &str) -> String {
         "zone_state" => vm.zone_state.clone(),
         "alias" => vm.alias.clone().unwrap_or_default(),
         "quota" => vm.quota.to_string(),
-        "flexible_disk_size" => vm.flexible_disk_size.to_string(),
+        "flexible_disk_size" => vm
+            .flexible_disk_size
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
         "max_physical_memory" => vm.max_physical_memory.to_string(),
         "vcpus" => vm.vcpus.map(|v| v.to_string()).unwrap_or_default(),
         "zonename" => vm.zonename.clone(),
         "zonepath" => vm.zonepath.clone(),
         "zoneid" => vm.zoneid.map(|z| z.to_string()).unwrap_or_default(),
         "autoboot" => vm.autoboot.to_string(),
-        "do_not_inventory" => vm.do_not_inventory.to_string(),
+        "do_not_inventory" => vm.do_not_inventory.unwrap_or(false).to_string(),
         "create_timestamp" => vm
             .create_timestamp
             .map(|t| t.to_rfc3339())
             .unwrap_or_default(),
-        // node's image_uuid column comes from the (boot) disk image.
+        // node's image_uuid column: the OS-zone top-level image_uuid, else
+        // the (boot) disk image for an HVM zone.
         "image_uuid" => vm
-            .disks
-            .iter()
-            .find(|d| d.boot)
-            .or_else(|| vm.disks.first())
-            .and_then(|d| d.image_uuid)
+            .image_uuid
+            .or_else(|| {
+                vm.disks.as_ref().and_then(|disks| {
+                    disks
+                        .iter()
+                        .find(|d| d.boot)
+                        .or_else(|| disks.first())
+                        .and_then(|d| d.image_uuid)
+                })
+            })
             .map(|u| u.to_string())
             .unwrap_or_default(),
         _ => String::new(),
@@ -146,7 +155,11 @@ fn disk_field(vm: &VmGetJson, rest: &str) -> String {
         Some((i, p)) => (i, p),
         None => return String::new(),
     };
-    let Some(disk) = idx.parse::<usize>().ok().and_then(|i| vm.disks.get(i)) else {
+    let Some(disk) = idx
+        .parse::<usize>()
+        .ok()
+        .and_then(|i| vm.disks.as_ref().and_then(|d| d.get(i)))
+    else {
         return String::new();
     };
     match prop {

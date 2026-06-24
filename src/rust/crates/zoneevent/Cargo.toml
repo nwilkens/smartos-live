@@ -1,0 +1,23 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+[package]
+name = "zoneevent"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Native Rust drop-in for the SmartOS zoneevent CLI: emits one JSON line per zone state transition from the com.sun:zones:status sysevent channel"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "zoneevent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
