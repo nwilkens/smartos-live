@@ -62,8 +62,20 @@ pub fn normalize(
 
     let quota_gib = payload.quota.unwrap_or(match brand {
         Brand::Bhyve => k::DEFAULT_BHYVE_QUOTA_GIB,
-        Brand::JoyentMinimal => k::DEFAULT_QUOTA_GIB,
+        // lx is an OS zone: same DEFAULT_QUOTA as joyent-minimal (VM.js
+        // applyZoneDefaults only special-cases bhyve).
+        Brand::JoyentMinimal | Brand::Lx => k::DEFAULT_QUOTA_GIB,
     });
+
+    // kernel_version: required for lx (proptable.js:1058 required: ['create'])
+    // and meaningless for the other brands. Fail closed on an lx create that
+    // omits it rather than emitting an lx zone the brand cannot install.
+    let kernel_version = match brand {
+        Brand::Lx => Some(payload.kernel_version.clone().ok_or_else(|| {
+            VmadmError::Payload("lx create requires kernel_version".to_string())
+        })?),
+        _ => None,
+    };
 
     // tmpfs default (VM.js:4925 applyZoneDefaults): OS brands mount a
     // tmpfs /tmp sized to max_physical_memory. When the payload omits
@@ -137,6 +149,7 @@ pub fn normalize(
         zfs_filesystem,
         zonepath,
         image_uuid: top_image_uuid,
+        kernel_version,
         create_timestamp: now,
         vm_version: 1,
         autoboot: payload.autoboot.unwrap_or(true),
@@ -218,7 +231,9 @@ fn derive_memory(brand: Brand, p: &VmadmCreatePayload, ram_mib: u64) -> Memory {
         Some(mpm) => mpm,
         None => match brand {
             Brand::Bhyve => ram_mib + brand.features().default_memory_overhead_mib,
-            Brand::JoyentMinimal => k::DEFAULT_RAM_MIB,
+            // OS zones (joyent-minimal, lx): max_physical_memory defaults to
+            // DEFAULT_RAM, no ram-based overhead.
+            Brand::JoyentMinimal | Brand::Lx => k::DEFAULT_RAM_MIB,
         },
     };
     let locked = p.max_locked_memory.unwrap_or(physical);
@@ -661,6 +676,10 @@ fn validate_spec(spec: &VmCreateSpec) -> Result<(), VmadmError> {
     if let Some(boot) = &spec.boot {
         reject_zonecfg_text("boot", boot)?;
     }
+    // kernel_version reaches the quoted `kernel-version` attr stream (lx).
+    if let Some(kv) = &spec.kernel_version {
+        reject_zonecfg_text("kernel_version", kv)?;
+    }
     for lp in &spec.limit_priv {
         reject_zonecfg_ident("limit_priv", lp)?;
     }
@@ -749,6 +768,57 @@ mod tests {
         assert_eq!(jm.quota_gib, 10);
         assert_eq!(jm.limit_priv, vec!["default".to_string()]);
         assert_eq!(jm.dns_domain, "local");
+    }
+
+    #[test]
+    fn lx_is_an_os_zone_with_kernel_version() {
+        // lx normalizes like joyent-minimal (OS quota, default limit_priv,
+        // tmpfs sized to physical mem, no disks/flex) plus the kernel_version
+        // threaded onto the spec.
+        let spec = parse(serde_json::json!({
+            "uuid": "00000000-0000-0000-0000-000000000001",
+            "brand": "lx",
+            "image_uuid": "4d3ed29a-c851-11e6-b5a9-639aada4a9c8",
+            "kernel_version": "4.4.0",
+            "max_physical_memory": 256
+        }));
+        assert_eq!(spec.brand, Brand::Lx);
+        assert_eq!(spec.kernel_version.as_deref(), Some("4.4.0"));
+        assert_eq!(spec.quota_gib, 10);
+        assert_eq!(spec.limit_priv, vec!["default".to_string()]);
+        assert_eq!(spec.tmpfs_mib, Some(256));
+        assert!(spec.disks.is_empty());
+        assert_eq!(spec.flexible_disk_size_mib, None);
+        // The zoneroot image stays at the top level (OS install template),
+        // never pushed onto a disk as bhyve does.
+        assert_eq!(
+            spec.image_uuid.map(|u| u.to_string()).as_deref(),
+            Some("4d3ed29a-c851-11e6-b5a9-639aada4a9c8")
+        );
+    }
+
+    #[test]
+    fn lx_without_kernel_version_is_rejected() {
+        let p = VmadmCreatePayload::from_json_slice(
+            serde_json::json!({
+                "brand": "lx",
+                "image_uuid": "4d3ed29a-c851-11e6-b5a9-639aada4a9c8"
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        assert!(normalize(p, epoch()).is_err());
+    }
+
+    #[test]
+    fn non_lx_drops_kernel_version() {
+        let spec = parse(serde_json::json!({
+            "brand": "joyent-minimal",
+            "image_uuid": "4d3ed29a-c851-11e6-b5a9-639aada4a9c8",
+            "kernel_version": "4.4.0"
+        }));
+        assert_eq!(spec.kernel_version, None);
     }
 
     #[test]

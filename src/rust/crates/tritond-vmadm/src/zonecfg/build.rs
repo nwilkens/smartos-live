@@ -114,6 +114,12 @@ fn emit_attrs(z: &mut Zonecfg, spec: &VmCreateSpec) {
     if !spec.resolvers.is_empty() {
         z.attr("resolvers", &spec.resolvers.join(","));
     }
+    // lx kernel-version attr (VM.js:6954 setAttr('kernel-version',...)). The
+    // lx brand reads this at install time; emit it before install so it is
+    // present in the zonecfg the brand inspects.
+    if let Some(kv) = &spec.kernel_version {
+        z.attr("kernel-version", kv);
+    }
     if let Some(alias) = &spec.alias {
         z.attr_base64("alias", alias);
     }
@@ -369,5 +375,79 @@ mod tests {
             "brand": "joyent-minimal", "max_physical_memory": 1, "max_shm_memory": 1
         }));
         assert!(out.contains("set max-shm-memory=1048576"));
+    }
+
+    #[test]
+    fn lx_zonecfg_golden() {
+        // The lx create zonecfg: brand=lx, the kernel-version attr, the
+        // OS-zone rctls/limitpriv (default), and the dataset-uuid for the
+        // zoneroot image. lx is an OS zone, so no disks/flexible-disk-size,
+        // ram, vnc-port, or boot attrs appear.
+        let out = render(serde_json::json!({
+            "uuid": "00000000-0000-0000-0000-000000000001",
+            "brand": "lx",
+            "image_uuid": "4d3ed29a-c851-11e6-b5a9-639aada4a9c8",
+            "kernel_version": "4.4.0",
+            "max_physical_memory": 256,
+            "quota": 10,
+            "nics": [
+                { "interface": "net0", "nic_tag": "admin",
+                  "ips": ["10.88.88.50/24"], "gateways": ["10.88.88.2"],
+                  "mac": "02:00:00:aa:bb:cc", "primary": true }
+            ]
+        }));
+
+        // brand + image (dataset-uuid) + kernel-version.
+        assert!(out.contains("set brand=lx"), "brand=lx missing:\n{out}");
+        assert!(
+            out.contains(
+                "add attr; set name=\"dataset-uuid\"; set type=string; \
+                 set value=\"4d3ed29a-c851-11e6-b5a9-639aada4a9c8\"; end"
+            ),
+            "dataset-uuid attr missing:\n{out}"
+        );
+        assert!(
+            out.contains(
+                "add attr; set name=\"kernel-version\"; set type=string; \
+                 set value=\"4.4.0\"; end"
+            ),
+            "kernel-version attr missing:\n{out}"
+        );
+        // OS-zone limitpriv (default), not the bhyve lockdown.
+        assert!(out.contains("set limitpriv=\"default\""));
+        // tmpfs is set for an lx OS zone (use_tmpfs), sized to physical mem.
+        assert!(out.contains("set name=\"tmpfs\"; set type=string; set value=\"256\""));
+        // No HVM-only attrs/resources.
+        assert!(!out.contains("add device"), "lx must not emit disks:\n{out}");
+        assert!(!out.contains("flexible-disk-size"));
+        assert!(!out.contains("name=\"ram\""));
+        assert!(!out.contains("name=\"vnc-port\""));
+    }
+
+    #[test]
+    fn lx_create_requires_kernel_version() {
+        // proptable.js:1058 kernel_version is required on an lx create.
+        let p = VmadmCreatePayload::from_json_slice(
+            serde_json::json!({
+                "brand": "lx",
+                "image_uuid": "4d3ed29a-c851-11e6-b5a9-639aada4a9c8"
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap_or_else(|e| panic!("payload: {e}"));
+        assert!(normalize(p, now()).is_err());
+    }
+
+    #[test]
+    fn non_lx_brands_never_emit_kernel_version() {
+        // kernel_version on a non-lx payload is ignored (dropped at normalize).
+        let out = render(serde_json::json!({
+            "brand": "joyent-minimal",
+            "image_uuid": "4d3ed29a-c851-11e6-b5a9-639aada4a9c8",
+            "kernel_version": "4.4.0"
+        }));
+        assert!(!out.contains("kernel-version"));
+        assert!(out.contains("set brand=joyent-minimal"));
     }
 }

@@ -17,6 +17,11 @@ pub enum Brand {
     JoyentMinimal,
     /// bhyve HVM for IaaS guests.
     Bhyve,
+    /// Linux-userland branded zone on the illumos kernel. Installs and
+    /// runs through the OS-zone path (zfs clone of an lx-dataset image),
+    /// differing from joyent-minimal only in `brand=lx` and the
+    /// `kernel-version` attr (proptable.js:2451).
+    Lx,
 }
 
 impl Brand {
@@ -26,24 +31,37 @@ impl Brand {
         match self {
             Brand::JoyentMinimal => "joyent-minimal",
             Brand::Bhyve => "bhyve",
+            Brand::Lx => "lx",
         }
     }
 
-    /// Parse the payload `brand` field. Unsupported brands (`kvm`, `lx`,
+    /// Parse the payload `brand` field. Unsupported brands (`kvm`,
     /// `joyent`, `builder`) are a hard error rather than a silent default.
     pub fn parse(s: &str) -> Result<Self, VmadmError> {
         match s {
             "joyent-minimal" => Ok(Brand::JoyentMinimal),
             "bhyve" => Ok(Brand::Bhyve),
+            "lx" => Ok(Brand::Lx),
             other => Err(VmadmError::UnsupportedBrand(other.to_string())),
         }
     }
 
     /// Whether this brand runs a hardware VM (bhyve). Drives memory
-    /// overhead, the disk/device path, and viona NIC attach.
+    /// overhead, the disk/device path, and viona NIC attach. lx is an OS
+    /// zone (`features.type == 'LX'`, proptable.js:2460), not HVM.
     #[must_use]
     pub fn is_hvm(self) -> bool {
         matches!(self, Brand::Bhyve)
+    }
+
+    /// Whether this brand installs and runs through the OS-zone code path
+    /// (joyent-minimal and lx). Both clone an image as the zoneroot and
+    /// share the install + boot lifecycle; the lx delta is the
+    /// `kernel-version` attr (proptable.js:2451 reuses the joyent-minimal
+    /// jinstall flow via `zoneadm install -t`).
+    #[must_use]
+    pub fn is_os_zone(self) -> bool {
+        matches!(self, Brand::JoyentMinimal | Brand::Lx)
     }
 
     /// The brand's features, mirroring the subset of
@@ -64,6 +82,8 @@ impl Brand {
                 // OS brands default tmpfs to max_physical_memory
                 // (proptable.js use_tmpfs); HVM brands never get tmpfs.
                 use_tmpfs: true,
+                // proptable.js:2426 joyent-minimal.update_mdata_exec_timeout.
+                update_mdata_exec_timeout: true,
                 default_memory_overhead_mib: 0,
                 // joyent-minimal carries no features.limit_priv, so
                 // applyZoneDefaults falls back to ["default"] (VM.js:4932).
@@ -75,6 +95,9 @@ impl Brand {
                 write_zone_netfiles: false,
                 use_vm_autoboot: false,
                 use_tmpfs: false,
+                // bhyve carries update_mdata_exec_timeout; its zoneroot has
+                // a SmartOS SMF repository (proptable.js bhyve features).
+                update_mdata_exec_timeout: true,
                 default_memory_overhead_mib: crate::constants::BHYVE_MEM_OVERHEAD_MIB,
                 // proptable.js brand_options.bhyve.features.limit_priv:
                 // strips file_link_any/net_access/proc_* so a guest cannot
@@ -87,6 +110,35 @@ impl Brand {
                     "-proc_info",
                     "-proc_session",
                 ],
+            },
+            // proptable.js:2451 brand_options.lx.features. lx mirrors
+            // joyent-minimal's OS sizing/priv model; the only behavioural
+            // delta the engine cares about is write_zone_netfiles=false
+            // (the lx brand writes the Linux net config itself, so the
+            // engine must NOT drop SmartOS /etc/hostname.* files into the
+            // zoneroot, proptable.js:2469).
+            Brand::Lx => BrandFeatures {
+                // VM.js:9553 checkDatasetProvisionable short-circuits to
+                // true for features.type == 'LX' (the lx image always
+                // exposes /var/svc/provisioning via the brand).
+                var_svc_provisioning: true,
+                // lx has no joyent zoneinit.
+                zoneinit: false,
+                // proptable.js:2469 lx.features.write_zone_netfiles = false.
+                write_zone_netfiles: false,
+                use_vm_autoboot: false,
+                // proptable.js:2466 lx.features.use_tmpfs = true; OS-style
+                // tmpfs sized to max_physical_memory.
+                use_tmpfs: true,
+                // lx omits update_mdata_exec_timeout (proptable.js:2451): a
+                // Linux userland has no illumos SMF repository, so the
+                // create path must NOT run svccfg against the zoneroot.
+                update_mdata_exec_timeout: false,
+                // OS zone: no memory overhead added to ram.
+                default_memory_overhead_mib: 0,
+                // lx carries no features.limit_priv, so applyZoneDefaults
+                // falls back to ["default"] (VM.js:4932).
+                limit_priv: &["default"],
             },
         }
     }
@@ -110,6 +162,13 @@ pub struct BrandFeatures {
     /// Brand mounts a tmpfs `/tmp`; when the payload omits `tmpfs`, node
     /// defaults it to `max_physical_memory` (MiB). HVM brands skip this.
     pub use_tmpfs: bool,
+    /// Brand exposes the SMF `svc:/smartdc/mdata:execute` service whose
+    /// start timeout the create path tunes via `svccfg`. lx has a Linux
+    /// userland (no illumos SMF repository in the zoneroot), so its
+    /// features omit `update_mdata_exec_timeout` and the engine must skip
+    /// the svccfg call (proptable.js: only the OS/HVM SmartOS brands carry
+    /// it; VM.js:9103 gates the call on this flag).
+    pub update_mdata_exec_timeout: bool,
     /// MiB added to `ram` to derive `max_physical_memory`.
     pub default_memory_overhead_mib: u64,
     /// Default `limit_priv` when the payload omits one. bhyve locks the
@@ -129,20 +188,40 @@ mod tests {
             Brand::parse("joyent-minimal").unwrap(),
             Brand::JoyentMinimal
         );
+        assert_eq!(Brand::parse("lx").unwrap(), Brand::Lx);
+        assert_eq!(Brand::Lx.as_str(), "lx");
         assert!(matches!(
             Brand::parse("kvm"),
             Err(VmadmError::UnsupportedBrand(_))
         ));
         assert!(matches!(
-            Brand::parse("lx"),
+            Brand::parse("joyent"),
             Err(VmadmError::UnsupportedBrand(_))
         ));
     }
 
     #[test]
-    fn bhyve_is_hvm_jm_is_not() {
+    fn bhyve_is_hvm_os_zones_are_not() {
         assert!(Brand::Bhyve.is_hvm());
         assert!(!Brand::JoyentMinimal.is_hvm());
+        assert!(!Brand::Lx.is_hvm());
+        // lx and joyent-minimal share the OS-zone install/lifecycle path.
+        assert!(Brand::Lx.is_os_zone());
+        assert!(Brand::JoyentMinimal.is_os_zone());
+        assert!(!Brand::Bhyve.is_os_zone());
+    }
+
+    #[test]
+    fn lx_features_match_os_model_with_no_netfiles() {
+        // proptable.js:2451: lx is an OS zone (default limit_priv, tmpfs,
+        // no memory overhead) but, unlike joyent-minimal, the brand owns
+        // the in-zone net config so the engine must not write netfiles.
+        let f = Brand::Lx.features();
+        assert_eq!(f.limit_priv, &["default"]);
+        assert!(f.use_tmpfs);
+        assert!(f.var_svc_provisioning);
+        assert_eq!(f.default_memory_overhead_mib, 0);
+        assert!(!f.write_zone_netfiles);
     }
 
     #[test]

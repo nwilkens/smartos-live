@@ -213,6 +213,9 @@ pub struct VmGetJson {
     /// `dataset-uuid` attr (node `image_uuid` for OS zones).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_uuid: Option<Uuid>,
+    /// `kernel-version` attr (lx only; node `kernel_version`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kernel_version: Option<String>,
 
     // ---- zfs-derived ----
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -327,6 +330,7 @@ impl VmGetJson {
             tmpfs: None,
             firewall_enabled: false,
             image_uuid: None,
+            kernel_version: None,
             zfs_filesystem: None,
             zpool: None,
             zfs_root_recsize: None,

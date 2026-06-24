@@ -25,6 +25,10 @@ pub struct VmadmCreatePayload {
     pub brand: String,
     #[serde(default)]
     pub image_uuid: Option<Uuid>,
+    /// lx kernel ABI version (`kernel-version` attr). Required on an lx
+    /// create (proptable.js:1058), ignored for other brands.
+    #[serde(default)]
+    pub kernel_version: Option<String>,
     #[serde(default)]
     pub alias: Option<String>,
     #[serde(default)]

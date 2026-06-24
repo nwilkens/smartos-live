@@ -97,6 +97,8 @@ async fn reconstruct<H: ZoneHost>(host: &H, uuid: Uuid, info: ZoneRuntime) -> Re
         .attrs
         .get("dataset-uuid")
         .and_then(|s| s.parse().ok());
+    // lx kernel-version attr (node `kernel_version`); absent for other brands.
+    vm.kernel_version = parsed.attrs.get("kernel-version").cloned();
     vm.create_timestamp = parsed
         .attrs
         .get("create-timestamp")
@@ -909,6 +911,46 @@ mod tests {
         let i_zfs = ops.iter().position(|o| o.contains("zfs get")).expect("zfs");
         assert!(i_info < i_export, "info before export: {ops:?}");
         assert!(i_export < i_zfs, "export before zfs: {ops:?}");
+    }
+
+    #[tokio::test]
+    async fn get_lx_reports_brand_and_kernel_version() {
+        // An lx export is an OS-zone export with brand=lx + a kernel-version
+        // attr + the dataset-uuid for the zoneroot image. get must surface
+        // brand=lx, kernel_version, image_uuid, and (like any OS zone) emit
+        // no `disks`.
+        let u = uuid();
+        let export = format!(
+            "create -b\n\
+             set zonepath=/zones/{u}\n\
+             set brand=lx\n\
+             set autoboot=true\n\
+             add attr\n\
+             set name=\"kernel-version\"\n\
+             set type=string\n\
+             set value=\"4.4.0\"\n\
+             end\n\
+             add attr\n\
+             set name=\"dataset-uuid\"\n\
+             set type=string\n\
+             set value=\"4d3ed29a-c851-11e6-b5a9-639aada4a9c8\"\n\
+             end\n"
+        );
+        let host = FakeHost::new();
+        host.set_zone_info(u, runtime("running", "lx"));
+        host.set_export(u, export);
+
+        let vm = get(&host, u).await.expect("get").expect("some");
+        assert_eq!(vm.brand, "lx");
+        assert!(!vm.hvm, "lx is not an HVM brand");
+        assert_eq!(vm.kernel_version.as_deref(), Some("4.4.0"));
+        assert_eq!(
+            vm.image_uuid.map(|i| i.to_string()).as_deref(),
+            Some("4d3ed29a-c851-11e6-b5a9-639aada4a9c8")
+        );
+        // OS zone: no disks array, no flexible_disk_size.
+        assert!(vm.disks.is_none());
+        assert!(vm.flexible_disk_size.is_none());
     }
 
     #[tokio::test]

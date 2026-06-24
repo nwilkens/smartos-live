@@ -33,6 +33,10 @@ pub struct VmCreateSpec {
     /// OS zones clone this image as the zoneroot. bhyve usually has no
     /// zoneroot image (the boot disk carries the image).
     pub image_uuid: Option<Uuid>,
+    /// lx `kernel-version` attr (the Linux ABI version the brand emulates).
+    /// `Some` only for `Brand::Lx`; the lx brand reads this attr at install
+    /// time (proptable.js:1058, VM.js:6954).
+    pub kernel_version: Option<String>,
     pub create_timestamp: DateTime<Utc>,
     pub vm_version: u32,
     pub autoboot: bool,

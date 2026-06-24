@@ -79,8 +79,12 @@ pub async fn reprovision_in<H: ZoneHost>(
     }
 
     match info.brand.as_str() {
-        "joyent-minimal" => {
-            reprovision_joyent_minimal(host, uuid, new_image_uuid, &zfs_filesystem).await
+        // lx reprovisions through the OS-zone path identically to
+        // joyent-minimal (uninstall the zoneroot, reinstall the new image
+        // via `zoneadm install -t`); the kernel-version attr is preserved
+        // in zonecfg across the uninstall/install.
+        "joyent-minimal" | "lx" => {
+            reprovision_os_zone(host, uuid, new_image_uuid, &zfs_filesystem).await
         }
         "bhyve" => reprovision_bhyve(host, uuid, new_image_uuid, &zfs_filesystem, zpool).await,
         other => Err(VmadmError::UnsupportedBrand(other.to_string())),
@@ -148,13 +152,13 @@ fn is_halted_state(state: &str) -> bool {
     matches!(state, "installed" | "configured" | "incomplete")
 }
 
-/// JOYENT-MINIMAL: the zoneroot is the image clone, so re-imaging means
-/// uninstalling the zoneroot and re-installing it from the new image. A
-/// delegated `/data` dataset is a child of the zoneroot and would be
-/// destroyed by `uninstall -F`, so it is renamed OUT of the subtree (to a
-/// sibling) first and renamed back after the re-install — node's
+/// OS ZONES (joyent-minimal, lx): the zoneroot is the image clone, so
+/// re-imaging means uninstalling the zoneroot and re-installing it from the
+/// new image. A delegated `/data` dataset is a child of the zoneroot and
+/// would be destroyed by `uninstall -F`, so it is renamed OUT of the subtree
+/// (to a sibling) first and renamed back after the re-install — node's
 /// data-preservation dance (VM.js:11713/11761/12119/12142).
-async fn reprovision_joyent_minimal<H: ZoneHost>(
+async fn reprovision_os_zone<H: ZoneHost>(
     host: &H,
     uuid: Uuid,
     new_image_uuid: Uuid,

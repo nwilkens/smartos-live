@@ -61,7 +61,14 @@ where
     let mut journal = ResourceJournal::open(spec.uuid, journal_dir).await?;
 
     let result = match spec.brand {
-        Brand::JoyentMinimal => create_joyent_minimal(host, nictags, spec, now, &mut journal).await,
+        // lx installs and boots through the OS-zone path (zfs clone of the
+        // lx-dataset image via `zoneadm install -t`), exactly as
+        // joyent-minimal; the only deltas are the brand string and the
+        // kernel-version attr already baked into the zonecfg, plus skipping
+        // the SmartOS netfiles write (the lx brand owns its net config).
+        Brand::JoyentMinimal | Brand::Lx => {
+            create_os_zone(host, nictags, spec, now, &mut journal).await
+        }
         Brand::Bhyve => create_bhyve(host, nictags, spec, now, &mut journal).await,
     };
 
@@ -103,7 +110,10 @@ enum CreateOutcome {
     KeepZoneError(VmadmError),
 }
 
-async fn create_joyent_minimal<H, N>(
+/// The shared OS-zone create (joyent-minimal and lx). Both clone an image
+/// as the zoneroot through `zoneadm install -t` and share the whole
+/// lifecycle; per-brand behaviour is driven off `spec.brand.features()`.
+async fn create_os_zone<H, N>(
     host: &H,
     nictags: &N,
     spec: &VmCreateSpec,
@@ -142,7 +152,10 @@ where
         .await?;
     journal.mark_started(install_idx).await?;
     let image_uuid = spec.image_uuid.ok_or_else(|| {
-        VmadmError::Payload("joyent-minimal create requires image_uuid".to_string())
+        VmadmError::Payload(format!(
+            "{} create requires image_uuid",
+            spec.brand.as_str()
+        ))
     })?;
     host.zoneadm_install(&InstallArgs {
         zonename: spec.zonename.clone(),
@@ -186,20 +199,28 @@ where
     .await?;
     files::write_provisioning_marker(zonepath).await?;
 
-    // JM-8: mdata:execute SMF start timeout.
-    host.svccfg_mdata_exec_timeout(&spec.zonepath, spec.mdata_exec_timeout_secs)
-        .await?;
+    // JM-8: mdata:execute SMF start timeout. Skipped for lx, whose Linux
+    // zoneroot has no illumos SMF repository to svccfg against (VM.js:9103
+    // gates this on features.update_mdata_exec_timeout).
+    if spec.brand.features().update_mdata_exec_timeout {
+        host.svccfg_mdata_exec_timeout(&spec.zonepath, spec.mdata_exec_timeout_secs)
+            .await?;
+    }
 
-    // JM-9: zoneroot network files.
-    let hostname = spec
-        .hostname
-        .clone()
-        .unwrap_or_else(|| spec.zonename.clone());
-    files::write_zone_netfiles(zonepath, &spec.nics, &hostname).await?;
+    // JM-9: zoneroot network files. The lx brand writes the Linux net
+    // config itself (proptable.js:2469 write_zone_netfiles=false), so only
+    // joyent-minimal drops SmartOS /etc/hostname.* files into the zoneroot.
+    if spec.brand.features().write_zone_netfiles {
+        let hostname = spec
+            .hostname
+            .clone()
+            .unwrap_or_else(|| spec.zonename.clone());
+        files::write_zone_netfiles(zonepath, &spec.nics, &hostname).await?;
+    }
 
     // The proteus nic-tag precondition: every NIC link must be a
-    // registered nic_tag before boot, else the joyent brand statechange
-    // hook bails "undefined VNIC". FAIL-CLOSED for joyent-minimal.
+    // registered nic_tag before boot, else the brand statechange hook bails
+    // "undefined VNIC". FAIL-CLOSED for OS zones (joyent-minimal and lx).
     ensure_nic_tags_fail_closed(nictags, spec).await?;
 
     // JM-12: drop the provisioning attr now that setup is complete.
@@ -607,8 +628,74 @@ mod tests {
         spec
     }
 
+    /// An lx spec sandboxed like [`jm_spec`].
+    fn lx_spec(tmp: &Path) -> VmCreateSpec {
+        let payload = VmadmCreatePayload::from_json_slice(
+            serde_json::json!({
+                "uuid": "11111111-1111-1111-1111-111111111111",
+                "brand": "lx",
+                "image_uuid": "4d3ed29a-c851-11e6-b5a9-639aada4a9c8",
+                "kernel_version": "4.4.0",
+                "alias": "lx0", "max_physical_memory": 256, "quota": 10,
+                "nics": [{ "interface": "net0", "nic_tag": "admin",
+                    "ip": "10.88.88.50", "netmask": "255.255.255.0",
+                    "gateway": "10.88.88.2",
+                    "mac": "02:00:00:aa:bb:cc", "primary": true }]
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("payload");
+        let mut spec = normalize(payload, now()).expect("normalize");
+        spec.zonepath = tmp
+            .join(spec.uuid.to_string())
+            .to_string_lossy()
+            .into_owned();
+        spec
+    }
+
     fn index_of(ops: &[String], needle: &str) -> Option<usize> {
         ops.iter().position(|o| o.contains(needle))
+    }
+
+    #[tokio::test]
+    async fn lx_create_uses_os_path_and_skips_netfiles() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let jdir = tempfile::tempdir().expect("jdir");
+        let spec = lx_spec(tmp.path());
+        let host = FakeHost::new();
+        let nics = FakeNicTags::new();
+
+        let uuid = create_in(&host, &nics, &spec, now(), jdir.path())
+            .await
+            .expect("create");
+        assert_eq!(uuid, spec.uuid);
+
+        // The rendered zonecfg carries brand=lx + the kernel-version attr
+        // (FakeHost only records a doc's first line, so assert on the doc).
+        let doc = crate::zonecfg::build_create_zonecfg(&spec, now());
+        assert!(doc.contains("set brand=lx"));
+        assert!(
+            doc.contains("set name=\"kernel-version\"") && doc.contains("set value=\"4.4.0\""),
+            "kernel-version attr in zonecfg:\n{doc}"
+        );
+
+        let ops = host.ops();
+        // Install goes through the OS path (image clone template + nodataset).
+        assert!(
+            ops.iter().any(|o| o
+                .contains("-t 4d3ed29a-c851-11e6-b5a9-639aada4a9c8")
+                && o.contains("-x nodataset")),
+            "lx installs via the OS template: {ops:?}"
+        );
+        // nic_tag fail-closed precondition still applies to lx.
+        assert_eq!(nics.ensured(), vec!["admin".to_string()]);
+        // lx brand owns its net config: the engine must NOT write SmartOS
+        // /etc/nodename / hostname.* into the zoneroot.
+        assert!(
+            !Path::new(&spec.zonepath).join("root/etc/nodename").exists(),
+            "lx must not get SmartOS netfiles"
+        );
     }
 
     #[tokio::test]
