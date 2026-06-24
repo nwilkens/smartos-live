@@ -21,7 +21,9 @@ pub mod protocol;
 pub mod resolver;
 pub mod server;
 pub mod vminfo_client;
+pub mod writer;
 
 pub use daemon::{Agent, Config};
 pub use handler::{MetadataWriter, ReadOnlyWriter};
 pub use resolver::WriteOp;
+pub use writer::FileWriter;

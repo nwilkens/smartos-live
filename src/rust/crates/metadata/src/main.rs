@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use metadata::handler::ReadOnlyWriter;
-use metadata::{Agent, Config};
+use metadata::cache::VmCache;
+use metadata::{Agent, Config, FileWriter};
 
 #[derive(Parser)]
 #[command(name = "metadata", about = "SmartOS metadata agent", version)]
@@ -66,11 +66,12 @@ async fn main() -> std::process::ExitCode {
             .unwrap_or_default()
     );
 
-    // PUT/DELETE write-back is not yet wired to the vmadm update path; reads
-    // (GET/KEYS) are fully served. A write returns a FAILURE with a clear
-    // message rather than silently succeeding.
-    let writer = Arc::new(ReadOnlyWriter);
-    let mut agent = Agent::new(cfg, writer);
+    // PUT/DELETE persist to <zonepath>/config/metadata.json (atomic temp +
+    // rename); vminfod observes the rename and refreshes the cache the writer
+    // shares with the agent.
+    let cache = VmCache::new();
+    let writer = Arc::new(FileWriter::new(cache.clone()));
+    let mut agent = Agent::with_cache(cfg, writer, cache);
 
     if let Err(e) = agent.run().await {
         eprintln!("metadata: fatal: {e}");

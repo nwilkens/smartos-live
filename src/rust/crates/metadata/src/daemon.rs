@@ -74,11 +74,18 @@ impl<W: MetadataWriter + Send + Sync + 'static> Agent<W> {
     /// update path is not wired).
     #[must_use]
     pub fn new(cfg: Config, writer: Arc<W>) -> Self {
+        Self::with_cache(cfg, writer, VmCache::new())
+    }
+
+    /// Create an agent over a caller-supplied cache, so a [`crate::FileWriter`]
+    /// can share the same VM objects (for zonepath + current-metadata merges).
+    #[must_use]
+    pub fn with_cache(cfg: Config, writer: Arc<W>, cache: VmCache) -> Self {
         let ua = user_agent();
         let client = VminfoClient::new(cfg.vminfo_host.clone(), cfg.vminfo_port, ua);
         Self {
             cfg,
-            cache: VmCache::new(),
+            cache,
             client,
             writer,
             zones: HashMap::new(),
