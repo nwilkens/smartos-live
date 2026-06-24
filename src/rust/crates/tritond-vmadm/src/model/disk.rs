@@ -4,19 +4,26 @@
 //
 // Copyright 2026 Edgecast Cloud LLC.
 
-//! Normalized bhyve disk model. OS (joyent-minimal) zones have no disks
-//! here; their storage is the zoneroot dataset created by `zoneadm
+//! Normalized HVM (bhyve/kvm) disk model. OS (joyent-minimal/lx) zones have
+//! no disks here; their storage is the zoneroot dataset created by `zoneadm
 //! install`.
 
 use uuid::Uuid;
 
 use crate::error::VmadmError;
 
+/// A zvol-backed disk's emulated device model. bhyve and kvm share virtio
+/// but otherwise diverge: bhyve has ahci/nvme, kvm has scsi/ide
+/// (proptable.js disk_models, 2383/2449). The model string is validated
+/// against the brand's set in normalize, so an out-of-set model (e.g. nvme
+/// on kvm) is rejected at create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiskModel {
     Virtio,
     Ahci,
     Nvme,
+    Scsi,
+    Ide,
 }
 
 impl DiskModel {
@@ -26,16 +33,23 @@ impl DiskModel {
             DiskModel::Virtio => "virtio",
             DiskModel::Ahci => "ahci",
             DiskModel::Nvme => "nvme",
+            DiskModel::Scsi => "scsi",
+            DiskModel::Ide => "ide",
         }
     }
 
+    /// Parse any recognized HVM disk model. The brand-specific allow-list
+    /// (bhyve vs kvm) is enforced separately in normalize against
+    /// `brand.features().disk_models`, so this accepts the union.
     pub fn parse(s: &str) -> Result<Self, VmadmError> {
         match s {
             "virtio" => Ok(DiskModel::Virtio),
             "ahci" => Ok(DiskModel::Ahci),
             "nvme" => Ok(DiskModel::Nvme),
+            "scsi" => Ok(DiskModel::Scsi),
+            "ide" => Ok(DiskModel::Ide),
             other => Err(VmadmError::Payload(format!(
-                "unsupported bhyve disk model {other:?}"
+                "unsupported HVM disk model {other:?}"
             ))),
         }
     }
@@ -67,11 +81,28 @@ pub enum Refreservation {
     None,
 }
 
-/// A bhyve disk after normalization.
+/// The zvol dataset name for an HVM disk. bhyve nests disks UNDER the
+/// zoneroot (`{zpool}/{uuid}/disk{idx}`, a child) because the zoneroot is
+/// pre-created and bounds them via the RFD-0148 refquota; kvm makes them
+/// FLAT SIBLINGS (`{zpool}/{uuid}-disk{idx}`, a dash) because the brand
+/// owns the zoneroot and the disks live outside it (createVolumes zvolfmt,
+/// VM.js:3174: `payload.brand === 'bhyve' ? '%s/%s/disk%d' : '%s/%s-disk%d'`).
+#[must_use]
+pub fn disk_dataset(zpool: &str, vm_uuid: Uuid, idx: u32, brand: crate::brand::Brand) -> String {
+    if brand == crate::brand::Brand::Bhyve {
+        format!("{zpool}/{vm_uuid}/disk{idx}")
+    } else {
+        format!("{zpool}/{vm_uuid}-disk{idx}")
+    }
+}
+
+/// An HVM (bhyve/kvm) disk after normalization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiskSpec {
     pub uuid: Uuid,
-    /// `{zpool}/{vm_uuid}/disk{idx}`.
+    /// The zvol dataset name. bhyve: `{zpool}/{uuid}/disk{idx}` (child of
+    /// the zoneroot); kvm: `{zpool}/{uuid}-disk{idx}` (flat sibling). See
+    /// [`disk_dataset`].
     pub zfs_filesystem: String,
     /// `/dev/zvol/rdsk/{zfs_filesystem}` (raw, for mkfs/clone).
     pub raw_path: String,

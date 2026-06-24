@@ -81,7 +81,13 @@ async fn reconstruct<H: ZoneHost>(host: &H, uuid: Uuid, info: ZoneRuntime) -> Re
     };
     vm.zoneid = info.zoneid;
     vm.zonedid = info.zonedid;
-    vm.autoboot = parsed.autoboot;
+    // For brands that manage autoboot via the vm-autoboot attr (kvm), the
+    // zonecfg scalar is pinned to false and the real value lives in the
+    // attr; vmload prefers it. Other brands report the scalar directly.
+    vm.autoboot = match parsed.attrs.get("vm-autoboot") {
+        Some(v) => v == "true",
+        None => parsed.autoboot,
+    };
     // node: hvm = HVM_BRANDS.indexOf(brand) >= 0 (bhyve/kvm).
     let is_hvm = vm.brand == "bhyve" || vm.brand == "kvm";
     vm.hvm = is_hvm;

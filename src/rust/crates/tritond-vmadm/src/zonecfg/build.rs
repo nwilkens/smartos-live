@@ -42,13 +42,23 @@ pub fn build_create_zonecfg(spec: &VmCreateSpec, now: chrono::DateTime<chrono::U
         z.attr("dataset-uuid", &image.to_string());
     }
 
-    // (use_vm_autoboot is false for both supported brands, so the header
-    // `set autoboot=false` is skipped; autoboot is emitted below instead.)
+    // use_vm_autoboot brands (kvm) ALWAYS set the zonecfg scalar
+    // `autoboot=false` in the immutable header (createZone:9718) so the
+    // zones tools never auto-boot the VM — vmadmd owns booting via the
+    // vm-autoboot attr instead. Brands without it (bhyve/joyent-minimal/lx)
+    // keep autoboot as a scalar tracking the payload value (emitted below).
+    if spec.brand.features().use_vm_autoboot {
+        z.line("set autoboot=false");
+    }
 
     // ---- buildZonecfgUpdate ----
     emit_global_props(&mut z, spec);
-    // `set autoboot=<bool>` (use_vm_autoboot false for both brands).
-    z.set("autoboot", &spec.autoboot.to_string());
+    // For non-vm-autoboot brands, `set autoboot=<bool>` tracks the payload.
+    // vm-autoboot brands already pinned the scalar to false above and carry
+    // the real value in the vm-autoboot attr (emitted in emit_attrs).
+    if !spec.brand.features().use_vm_autoboot {
+        z.set("autoboot", &spec.autoboot.to_string());
+    }
     z.capped_memory(
         spec.max_physical_memory_mib,
         spec.max_locked_memory_mib,
@@ -124,24 +134,39 @@ fn emit_attrs(z: &mut Zonecfg, spec: &VmCreateSpec) {
         z.attr_base64("alias", alias);
     }
 
+    // vm-autoboot attr (VM.js:6978 `setAttr('vm-autoboot', 'autoboot')`):
+    // use_vm_autoboot brands (kvm) carry the real autoboot value here, since
+    // the zonecfg scalar is pinned to false so the zones tools never boot it.
+    if spec.brand.features().use_vm_autoboot {
+        z.attr("vm-autoboot", &spec.autoboot.to_string());
+    }
+
     if spec.brand.is_hvm() {
+        // ram is shared by both HVM brands (VM.js:6983 gates on type
+        // BHYVE|KVM).
         z.attr("ram", &spec.ram_mib.to_string());
-        // com1/com2 default to the KVM-compatible values when unset
-        // (buildZonecfgUpdate bhyve block).
-        z.attr("com1", "/dev/zconsole");
-        z.attr("com2", "socket,/tmp/vm.ttyb");
-        if let Some(bootrom) = &spec.bootrom {
-            z.attr("bootrom", bootrom);
+
+        // com1/com2/bootrom/bhyve-extra-opts/zlog-* are BHYVE-ONLY
+        // (VM.js:6987 `if (brand === 'bhyve')`). KVM uses qemu's own
+        // serial/console wiring and does not get this block.
+        if spec.brand == crate::brand::Brand::Bhyve {
+            // com1/com2 default to the KVM-compatible values when unset.
+            z.attr("com1", "/dev/zconsole");
+            z.attr("com2", "socket,/tmp/vm.ttyb");
+            if let Some(bootrom) = &spec.bootrom {
+                z.attr("bootrom", bootrom);
+            }
+            if let Some(opts) = &spec.bhyve_extra_opts {
+                z.attr("bhyve-extra-opts", opts);
+            }
+            z.attr("zlog-mode", "g--");
+            z.attr("zlog-name", "platform.log");
         }
-        if let Some(opts) = &spec.bhyve_extra_opts {
-            z.attr("bhyve-extra-opts", opts);
-        }
-        z.attr("zlog-mode", "g--");
-        z.attr("zlog-name", "platform.log");
+
+        // vcpus then boot then vnc-port are shared HVM attrs (VM.js:7008-
+        // 7012). KVM-only attrs (cpu-type/vga/spice/virtio-*/qemu-*) are not
+        // yet ported; the create payload does not carry them here.
         z.attr("vcpus", &spec.vcpus.to_string());
-        // buildZonecfgUpdate emits boot then vnc-port in the HVM attr block
-        // (VM.js:7009/7012); KVM-only attrs (cpu-type/vga/spice/virtio-*)
-        // are intentionally not ported.
         if let Some(boot) = &spec.boot {
             z.attr("boot", boot);
         }
@@ -367,6 +392,61 @@ mod tests {
         let out = render(serde_json::json!({"brand": "bhyve", "ram": 512}));
         assert!(!out.contains("name=\"vnc-port\""));
         assert!(!out.contains("name=\"boot\""));
+    }
+
+    #[test]
+    fn kvm_zonecfg_golden() {
+        // The kvm create zonecfg: brand=kvm, the immutable `set autoboot=false`
+        // (use_vm_autoboot), the vm-autoboot attr carrying the real value, the
+        // shared HVM attrs (ram/vcpus/vnc-port), a disk device on the dash
+        // sibling, and the same bhyve lockdown limitpriv. KVM must NOT emit the
+        // bhyve-only com1/com2/bootrom/zlog block.
+        let out = render(serde_json::json!({
+            "uuid": "00000000-0000-0000-0000-000000000002",
+            "brand": "kvm", "ram": 512, "vcpus": 1, "vnc_port": 0,
+            "alias": "kvm0",
+            "disks": [{ "boot": true, "model": "virtio",
+                "image_uuid": "6dde8b1a-0780-11e4-a57b-6b7ac24a7cd4",
+                "size": 5120 }],
+            "nics": [{ "interface": "net0", "nic_tag": "admin",
+                "model": "virtio", "ips": ["10.88.88.55/24"],
+                "gateways": ["10.88.88.2"], "mac": "02:00:00:de:ad:03",
+                "primary": true }]
+        }));
+
+        assert!(out.contains("set brand=kvm"), "brand=kvm:\n{out}");
+        // Immutable header pins autoboot to false, and there is NO separate
+        // `set autoboot=true/false` scalar from buildZonecfgUpdate.
+        assert!(out.contains("set autoboot=false"), "autoboot=false:\n{out}");
+        assert!(!out.contains("set autoboot=true"), "no autoboot=true scalar:\n{out}");
+        // vm-autoboot attr carries the real (defaulted true) value.
+        assert!(
+            out.contains(
+                "add attr; set name=\"vm-autoboot\"; set type=string; set value=\"true\"; end"
+            ),
+            "vm-autoboot attr:\n{out}"
+        );
+        // bhyve lockdown limitpriv (kvm shares it).
+        assert!(out.contains(
+            "set limitpriv=\"default,-file_link_any,-net_access,-proc_fork,-proc_info,-proc_session\""
+        ));
+        // Shared HVM attrs.
+        assert!(out.contains("set name=\"ram\"; set type=string; set value=\"512\""));
+        assert!(out.contains("set name=\"vcpus\"; set type=string; set value=\"1\""));
+        assert!(out.contains("set name=\"vnc-port\"; set type=string; set value=\"0\""));
+        // The disk device targets the dash-sibling raw zvol.
+        assert!(
+            out.contains(
+                "set match=/dev/zvol/rdsk/zones/00000000-0000-0000-0000-000000000002-disk0"
+            ),
+            "kvm disk device on dash-sibling:\n{out}"
+        );
+        // NO bhyve-only attrs.
+        assert!(!out.contains("com1"), "kvm has no com1:\n{out}");
+        assert!(!out.contains("com2"), "kvm has no com2:\n{out}");
+        assert!(!out.contains("zlog-mode"), "kvm has no zlog-mode:\n{out}");
+        assert!(!out.contains("zlog-name"), "kvm has no zlog-name:\n{out}");
+        assert!(!out.contains("bhyve-extra-opts"), "kvm has no bhyve-extra-opts:\n{out}");
     }
 
     #[test]

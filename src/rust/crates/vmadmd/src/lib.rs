@@ -21,11 +21,14 @@
 //! * [`vminfo_client`] — the async vminfod client that replaces `VM.load` /
 //!   `VM.lookup`.
 //!
-//! KVM and SPICE are deferred to P9; the selection branches and registries
-//! are carried with `TODO(P9-KVM)` markers so the brand path slots in.
+//! KVM control (P9b) adds the [`qmp`] client — the QEMU Machine Protocol
+//! monitor over `<zonepath>/root/tmp/vm.qmp` — wiring stop/reset/sysrq/info
+//! and the vnc/spice set_password for the kvm brand. bhyve/joyent-minimal
+//! behaviour is unchanged.
 
 pub mod http;
 pub mod proxy;
+pub mod qmp;
 pub mod responsibilities;
 pub mod state;
 pub mod vminfo_client;

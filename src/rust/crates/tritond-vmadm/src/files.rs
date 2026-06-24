@@ -139,6 +139,24 @@ pub async fn write_provisioning_marker(zonepath: &Path) -> Result<()> {
     write_and_rename(&marker, "").await
 }
 
+/// Write the kvm `/root/startvm` qemu launch script and mark it executable
+/// (0755), the way node `VM.js` writeKVMStartScript does (VM.js:13868). The
+/// kvm brand's boot hook `exec`s this script; without it `zoneadm boot` fails
+/// with "could not stat .../root/startvm". Rejects a symlinked path component
+/// (image-escape defense) before writing.
+pub async fn write_startvm(zonepath: &Path, script: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let target = zonepath.join("root/startvm");
+    assert_no_symlink_escape(zonepath, &target).await?;
+    if let Some(parent) = target.parent() {
+        mkdir_p(parent).await?;
+    }
+    write_and_rename(&target, script).await?;
+    tokio::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755))
+        .await
+        .map_err(|e| io_err(&target, e))
+}
+
 /// `JSON.stringify(x, null, 2)` equivalent: 2-space pretty, no trailing
 /// newline (node's `writeAndRename` writes the string verbatim).
 fn to_pretty<T: Serialize>(value: &T) -> Result<String> {

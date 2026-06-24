@@ -70,6 +70,7 @@ where
             create_os_zone(host, nictags, spec, now, &mut journal).await
         }
         Brand::Bhyve => create_bhyve(host, nictags, spec, now, &mut journal).await,
+        Brand::Kvm => create_kvm(host, nictags, spec, now, &mut journal).await,
     };
 
     match result {
@@ -423,7 +424,170 @@ where
     boot_and_finalize(host, spec).await
 }
 
-/// Clone an image-backed bhyve disk from `zones/<image>@final`, falling
+/// kvm create: per-disk clone/create SIBLING zvols -> zonecfg (brand=kvm)
+/// -> install (the brand creates the zoneroot; `-x nodataset` only fires for
+/// the SPICE-root image_uuid case) -> SIMPLE quota on the brand-created
+/// zoneroot -> config files -> nic-tag (best-effort) -> boot.
+///
+/// The five concrete deltas from [`create_bhyve`] (RFD-0148/snapspace):
+/// 1. zvols are FLAT SIBLINGS (`zones/<uuid>-diskN`), not children — already
+///    encoded in `disk.zfs_filesystem` by normalize, so the clone/create
+///    loop is reused verbatim;
+/// 2. NO pre-created zoneroot dataset — the kvm brand creates it at install
+///    (so this skips the `zfs create zones/<uuid>` BH-2 step);
+/// 3. SIMPLE quota (`zfs set quota=Ng`), not the refquota/refreservation=auto
+///    dance — the disks live outside the zoneroot so they do not count
+///    against it (setQuota else-branch, VM.js:1465);
+/// 4. install passes `-x nodataset` ONLY when a top-level image_uuid is set
+///    (the brand owns the zonepath dataset otherwise — installZone
+///    VM.js:8405/8408, the `else if (brand==='bhyve')` does NOT fire for
+///    kvm);
+/// 5. the memory overhead is 1024 (handled in normalize via features).
+async fn create_kvm<H, N>(
+    host: &H,
+    nictags: &N,
+    spec: &VmCreateSpec,
+    now: DateTime<Utc>,
+    journal: &mut ResourceJournal,
+) -> Result<CreateOutcome>
+where
+    H: ZoneHost,
+    N: NicTagRegistrar,
+{
+    let zonepath = Path::new(&spec.zonepath);
+
+    // Uniqueness on the zoneroot DATASET, mirroring create_bhyve. kvm does
+    // NOT pre-create it, but the brand will at install; an orphan dataset
+    // from a prior half-cleaned op would make install fail, and a rollback
+    // `zfs destroy -rf` could then nuke data this create never owned. Refuse
+    // up front (a SPICE-root install also targets this name via `-t`).
+    if host.zfs_snapshot_exists(&spec.zfs_filesystem).await? {
+        return Err(VmadmError::AlreadyExists(spec.uuid));
+    }
+
+    // KV-1: clone or create each disk zvol (siblings; the per-disk undo is
+    // `zfs destroy -rf zones/<uuid>-diskN`). No zoneroot dataset exists yet,
+    // so each disk MUST be journaled individually — there is no parent-root
+    // teardown to cover a partial loop the way create_bhyve has.
+    for disk in &spec.disks {
+        if disk.effective_media() == crate::model::disk::DiskMedia::Cdrom || disk.nocreate {
+            continue;
+        }
+        let idx = journal
+            .plan(
+                "zvol",
+                UndoAction::ZfsDestroyRecursive {
+                    dataset: disk.zfs_filesystem.clone(),
+                },
+            )
+            .await?;
+        journal.mark_started(idx).await?;
+        if let Some(image) = disk.image_uuid {
+            clone_image_disk(host, spec, disk, image).await?;
+        } else {
+            let size = disk.size_mib.or(disk.image_size_mib).ok_or_else(|| {
+                VmadmError::Payload(format!("kvm disk {} has no size", disk.disk_idx))
+            })?;
+            host.zfs_create_volume(&disk.zfs_filesystem, size, &blank_volume_props(disk))
+                .await?;
+        }
+        if disk.cloudinit_seed {
+            host.build_nocloud_seed(&disk.raw_path, &crate::seed::build_seed_files(spec))
+                .await?;
+        }
+        journal.mark_done(idx).await?;
+    }
+
+    // KV-2: zone configuration (brand=kvm + HVM attrs + the disk devices).
+    let cfg_idx = journal
+        .plan(
+            "zone-config",
+            UndoAction::ZonecfgDeleteForce { uuid: spec.uuid },
+        )
+        .await?;
+    journal.mark_started(cfg_idx).await?;
+    host.zonecfg(
+        ZoneRef::Zonename(spec.zonename.clone()),
+        &build_create_zonecfg(spec, now),
+    )
+    .await?;
+    journal.mark_done(cfg_idx).await?;
+
+    if spec.create_only {
+        return Ok(CreateOutcome::Ok);
+    }
+
+    // KV-3: install. The kvm brand CREATES the zonepath dataset itself, so we
+    // pass NO `-x nodataset` for the normal (image-on-disk0) case. Only the
+    // SPICE-root case (a top-level image_uuid) sets `-t image_uuid -x
+    // nodataset` so the brand clones it as the hidden zoneroot. This is the
+    // exact OPPOSITE default from bhyve, which always pre-creates the root
+    // and therefore always passes `-x nodataset` (installZone VM.js:8405).
+    let install_idx = journal
+        .plan(
+            "zone-install",
+            UndoAction::ZoneadmUninstallForce { uuid: spec.uuid },
+        )
+        .await?;
+    journal.mark_started(install_idx).await?;
+    host.zoneadm_install(&InstallArgs {
+        zonename: spec.zonename.clone(),
+        quota_gib: spec.quota_gib,
+        image_uuid: spec.image_uuid,
+        no_dataset: spec.image_uuid.is_some(),
+    })
+    .await?;
+    journal.mark_done(install_idx).await?;
+
+    // KV-4: SIMPLE quota on the brand-created zoneroot. NOT apply_bhyve_quota:
+    // kvm zvols are siblings outside the zoneroot, so the zoneroot quota only
+    // bounds the small config/log dataset. `quota=none` when 0 (setQuota
+    // VM.js:1458), else `<N>g`.
+    let quota_arg = if spec.quota_gib == 0 {
+        "none".to_string()
+    } else {
+        format!("{}g", spec.quota_gib)
+    };
+    host.zfs_set(&spec.zfs_filesystem, &[("quota".to_string(), quota_arg)])
+        .await?;
+
+    // KV-5: config files (covered by the install undo, which removes the
+    // brand-created zoneroot).
+    files::write_create_config(
+        zonepath,
+        &spec.customer_metadata,
+        &spec.internal_metadata,
+        &spec.tags,
+        &spec.routes,
+    )
+    .await?;
+
+    // KV-6: the qemu launch script. Unlike bhyve (brand method scripts), the
+    // kvm brand's boot hook `exec`s /root/startvm, which vmadm must write from
+    // the VM spec (VM.js buildKVMCmdline + writeKVMStartScript). Without it,
+    // `zoneadm boot` fails "could not stat .../root/startvm". The smbios
+    // version comes from the host's sysinfo "Live Image"; a missing fact is
+    // non-fatal (node tolerates an empty buildstamp).
+    let buildstamp = host
+        .host_facts()
+        .await
+        .ok()
+        .and_then(|f| f.platform_buildstamp)
+        .unwrap_or_default();
+    let script = crate::startvm::build_startvm_script(spec, &buildstamp);
+    files::write_startvm(zonepath, &script).await?;
+
+    // kvm nic-tags are best-effort: viona/virtio attaches the raw link, so an
+    // unregistered tag does not block boot (same as bhyve).
+    ensure_nic_tags_best_effort(nictags, spec).await;
+
+    host.zonecfg(ZoneRef::Uuid(spec.uuid), "remove attr name=provisioning\n")
+        .await?;
+
+    boot_and_finalize(host, spec).await
+}
+
+/// Clone an image-backed HVM disk from `zones/<image>@final`, falling
 /// back to snapshotting the image dataset when `@final` is absent.
 async fn clone_image_disk<H: ZoneHost>(
     host: &H,
@@ -995,6 +1159,144 @@ mod tests {
             "{ops:?}"
         );
         assert!(index_of(&ops, "boot").is_none());
+    }
+
+    fn kvm_spec(tmp: &Path) -> VmCreateSpec {
+        let payload = VmadmCreatePayload::from_json_slice(
+            serde_json::json!({
+                "uuid": "11111111-1111-1111-1111-111111111111",
+                "brand": "kvm", "alias": "kvm0", "hostname": "kvm0",
+                "ram": 512, "vcpus": 1, "vnc_port": 0,
+                "disks": [{ "uuid": "44444444-4444-4444-4444-444444444444",
+                    "boot": true, "model": "virtio",
+                    "image_uuid": "33333333-3333-3333-3333-333333333333",
+                    "size": 5120 }],
+                "nics": [{ "interface": "net0", "nic_tag": "admin",
+                    "model": "virtio", "mac": "02:00:00:de:ad:03",
+                    "ips": ["10.88.88.55/24"], "gateways": ["10.88.88.2"],
+                    "primary": true }]
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("payload");
+        let mut spec = normalize(payload, now()).expect("normalize");
+        spec.zonepath = tmp
+            .join(spec.uuid.to_string())
+            .to_string_lossy()
+            .into_owned();
+        spec
+    }
+
+    #[tokio::test]
+    async fn kvm_create_clones_sibling_disk_simple_quota_no_root_precreate() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let jdir = tempfile::tempdir().expect("jdir");
+        let spec = kvm_spec(tmp.path());
+        let host = FakeHost::new();
+        let nics = FakeNicTags::new();
+
+        let uuid = create_in(&host, &nics, &spec, now(), jdir.path())
+            .await
+            .expect("create");
+        assert_eq!(uuid, spec.uuid);
+
+        let ops = host.ops();
+        let root = "zones/11111111-1111-1111-1111-111111111111";
+        // KVM must NOT pre-create the zoneroot dataset (the brand does it at
+        // install). `zfs create zones/<uuid>` with no -disk suffix must be
+        // absent (the disk clone targets the dash-sibling instead).
+        assert!(
+            !ops.iter().any(|o| o == &format!("zfs create {root}")),
+            "kvm must not pre-create the zoneroot: {ops:?}"
+        );
+        // The boot disk is cloned from @final to the FLAT SIBLING (dash).
+        assert!(
+            ops.iter().any(|o| o.contains("@final")
+                && o.contains(&format!("{root}-disk0"))
+                && o.contains("-o volsize=5120M")),
+            "clone targets the dash-sibling disk0: {ops:?}"
+        );
+        // SIMPLE quota on the zoneroot: a single `zfs set quota=10g`, NOT the
+        // bhyve refquota/refreservation=auto dance.
+        assert!(
+            ops.iter()
+                .any(|o| o == &format!("zfs set quota=10g {root}")),
+            "simple quota on zoneroot: {ops:?}"
+        );
+        assert!(
+            !ops.iter().any(|o| o.contains("refquota")),
+            "kvm must not set refquota: {ops:?}"
+        );
+        // The image clone legitimately carries `-o refreservation=auto` (the
+        // zvol's own reservation, same as bhyve). What kvm must NOT do is the
+        // bhyve setQuotaBhyve per-volume `zfs set refreservation=auto <disk>`
+        // pass — assert that specific op is absent.
+        assert!(
+            !ops.iter().any(|o| o.starts_with("zfs set refreservation=auto")),
+            "kvm must not run the setQuotaBhyve refreservation=auto pass: {ops:?}"
+        );
+        // install has NO -t and NO -x nodataset (the brand creates the root).
+        let install = ops.iter().find(|o| o.contains("install")).expect("install");
+        assert!(
+            !install.contains("-x nodataset") && !install.contains("-t "),
+            "kvm install lets the brand create the zoneroot: {install}"
+        );
+        // booted, nic-tag best-effort ensured.
+        assert!(index_of(&ops, "boot").is_some());
+        assert_eq!(nics.ensured(), vec!["admin".to_string()]);
+        // The rendered zonecfg carries brand=kvm + autoboot=false + the
+        // vm-autoboot attr (use_vm_autoboot), and NO bhyve com1/zlog block.
+        let doc = crate::zonecfg::build_create_zonecfg(&spec, now());
+        assert!(doc.contains("set brand=kvm"), "brand=kvm:\n{doc}");
+        assert!(doc.contains("set autoboot=false"), "autoboot=false:\n{doc}");
+        assert!(
+            doc.contains("set name=\"vm-autoboot\""),
+            "vm-autoboot attr:\n{doc}"
+        );
+        assert!(!doc.contains("com1"), "kvm has no com1 attr:\n{doc}");
+        assert!(!doc.contains("zlog-mode"), "kvm has no zlog-mode:\n{doc}");
+        // The /root/startvm qemu launch script was written + made executable;
+        // without it the kvm brand boot hook fails "could not stat startvm".
+        let startvm = Path::new(&spec.zonepath).join("root/startvm");
+        assert!(startvm.exists(), "startvm written: {}", startvm.display());
+        let body = std::fs::read_to_string(&startvm).expect("read startvm");
+        assert!(body.contains("qemu-exec"), "startvm execs qemu: {body}");
+        assert!(
+            body.contains("-qmp\" \"chardev:qmp"),
+            "startvm wires the qmp control socket: {body}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&startvm).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o755, "startvm is 0755");
+        }
+    }
+
+    #[tokio::test]
+    async fn kvm_spice_root_install_uses_nodataset() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let jdir = tempfile::tempdir().expect("jdir");
+        let mut spec = kvm_spec(tmp.path());
+        // A SPICE-root install: a top-level image_uuid the brand clones as
+        // the hidden zoneroot via `-t image_uuid -x nodataset`.
+        spec.image_uuid = Some(
+            "55555555-5555-5555-5555-555555555555"
+                .parse()
+                .expect("uuid"),
+        );
+        let host = FakeHost::new();
+        create_in(&host, &FakeNicTags::new(), &spec, now(), jdir.path())
+            .await
+            .expect("create");
+        let ops = host.ops();
+        let install = ops.iter().find(|o| o.contains("install")).expect("install");
+        assert!(
+            install.contains("-t 55555555-5555-5555-5555-555555555555")
+                && install.contains("-x nodataset"),
+            "spice-root install: {install}"
+        );
     }
 
     #[tokio::test]

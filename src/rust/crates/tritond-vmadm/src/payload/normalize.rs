@@ -61,10 +61,12 @@ pub fn normalize(
     let zonepath = format!("/{zfs_filesystem}");
 
     let quota_gib = payload.quota.unwrap_or(match brand {
+        // Only bhyve uses the RFD-0148 refquota-on-zoneroot model whose
+        // default is DEFAULT_BHYVE_QUOTA (1 GiB). kvm's zvols are siblings
+        // outside the zoneroot, so the zoneroot gets the plain DEFAULT_QUOTA
+        // (10 GiB) like an OS zone (setQuota else-branch, VM.js:1465).
         Brand::Bhyve => k::DEFAULT_BHYVE_QUOTA_GIB,
-        // lx is an OS zone: same DEFAULT_QUOTA as joyent-minimal (VM.js
-        // applyZoneDefaults only special-cases bhyve).
-        Brand::JoyentMinimal | Brand::Lx => k::DEFAULT_QUOTA_GIB,
+        Brand::Kvm | Brand::JoyentMinimal | Brand::Lx => k::DEFAULT_QUOTA_GIB,
     });
 
     // kernel_version: required for lx (proptable.js:1058 required: ['create'])
@@ -92,7 +94,7 @@ pub fn normalize(
 
     let nics = normalize_nics(uuid, payload.add_nics.unwrap_or_default())?;
     let mut disks = if brand.is_hvm() {
-        normalize_disks(&zpool, uuid, payload.add_disks.unwrap_or_default())?
+        normalize_disks(&zpool, uuid, brand, payload.add_disks.unwrap_or_default())?
     } else {
         Vec::new()
     };
@@ -105,8 +107,14 @@ pub fn normalize(
     // this type"). So for bhyve, push a top-level image_uuid down onto a
     // boot disk that lacks one, and drop it from the top level so it never
     // reaches the OS-zone install template.
+    //
+    // KVM is DIFFERENT: a top-level image_uuid on kvm is the SPICE-root
+    // case — installZone keeps it as `-t image_uuid -x nodataset` so the
+    // brand clones it as the (hidden) zoneroot (VM.js:8405). So for kvm we
+    // leave a top-level image_uuid in place; the guest's bootable image is
+    // normally carried on disk0's own image_uuid, which is unaffected here.
     let mut top_image_uuid = payload.image_uuid;
-    if brand.is_hvm()
+    if brand == Brand::Bhyve
         && let Some(img) = top_image_uuid
     {
         let boot = disks.iter_mut().find(|d| d.boot);
@@ -126,7 +134,7 @@ pub fn normalize(
     // path so it can be regenerated later (nocloud.js updatePayloadDisks).
     let mut flexible_disk_size_mib = payload.flexible_disk_size;
     if brand.is_hvm() && nocloud {
-        let seed = nocloud_seed_disk(&zpool, uuid, disks.len() as u32);
+        let seed = nocloud_seed_disk(&zpool, uuid, disks.len() as u32, brand);
         internal_metadata.insert(
             "cloudinit_nocloud_path".to_string(),
             Value::String(seed.raw_path.clone()),
@@ -230,7 +238,11 @@ fn derive_memory(brand: Brand, p: &VmadmCreatePayload, ram_mib: u64) -> Memory {
     let physical = match p.max_physical_memory {
         Some(mpm) => mpm,
         None => match brand {
-            Brand::Bhyve => ram_mib + brand.features().default_memory_overhead_mib,
+            // HVM brands derive max_physical_memory = ram + overhead. The
+            // overhead differs by brand (bhyve 1280, kvm 1024); both come
+            // from features().default_memory_overhead_mib (VM.js:4636,
+            // case 'kvm': v += KVM_MEM_OVERHEAD).
+            Brand::Bhyve | Brand::Kvm => ram_mib + brand.features().default_memory_overhead_mib,
             // OS zones (joyent-minimal, lx): max_physical_memory defaults to
             // DEFAULT_RAM, no ram-based overhead.
             Brand::JoyentMinimal | Brand::Lx => k::DEFAULT_RAM_MIB,
@@ -435,12 +447,13 @@ fn generate_mac(vm_uuid: Uuid, idx: usize) -> String {
 fn normalize_disks(
     zpool: &str,
     vm_uuid: Uuid,
+    brand: Brand,
     raw: Vec<DiskPayload>,
 ) -> Result<Vec<DiskSpec>, VmadmError> {
     let mut disks: Vec<DiskSpec> = raw
         .into_iter()
         .enumerate()
-        .map(|(idx, d)| normalize_disk(zpool, vm_uuid, idx as u32, d))
+        .map(|(idx, d)| normalize_disk(zpool, vm_uuid, brand, idx as u32, d))
         .collect::<Result<_, _>>()?;
     assign_pci_slots(&mut disks);
     Ok(disks)
@@ -448,8 +461,9 @@ fn normalize_disks(
 
 /// The 16 MiB NoCloud cidata seed disk (a blank virtio zvol the host
 /// formats FAT16 `CIDATA`). PCI slot is assigned by [`assign_pci_slots`].
-fn nocloud_seed_disk(zpool: &str, vm_uuid: Uuid, idx: u32) -> DiskSpec {
-    let zfs_filesystem = format!("{zpool}/{vm_uuid}/disk{idx}");
+/// The dataset layout follows the brand (sibling for kvm, child for bhyve).
+fn nocloud_seed_disk(zpool: &str, vm_uuid: Uuid, idx: u32, brand: Brand) -> DiskSpec {
+    let zfs_filesystem = crate::model::disk::disk_dataset(zpool, vm_uuid, idx, brand);
     let raw_path = format!("/dev/zvol/rdsk/{zfs_filesystem}");
     DiskSpec {
         uuid: Uuid::new_v4(),
@@ -498,11 +512,25 @@ fn assign_pci_slots(disks: &mut [DiskSpec]) {
 fn normalize_disk(
     zpool: &str,
     vm_uuid: Uuid,
+    brand: Brand,
     idx: u32,
     d: DiskPayload,
 ) -> Result<DiskSpec, VmadmError> {
     let model = match d.model.as_deref() {
-        Some(m) => DiskModel::parse(m)?,
+        Some(m) => {
+            let parsed = DiskModel::parse(m)?;
+            // proptable.js model_required=true for both HVM brands, but the
+            // valid set differs (bhyve virtio/ahci/nvme vs kvm virtio/scsi/
+            // ide). Reject a model that is valid for the other HVM brand.
+            if !brand.features().disk_models.contains(&parsed.as_str()) {
+                return Err(VmadmError::Payload(format!(
+                    "disk model {m:?} is not valid for brand {} (valid: {})",
+                    brand.as_str(),
+                    brand.features().disk_models.join(",")
+                )));
+            }
+            parsed
+        }
         None => return Err(VmadmError::DiskModelRequired),
     };
     let media = match d.media.as_deref() {
@@ -515,7 +543,7 @@ fn normalize_disk(
         }
         None => None,
     };
-    let zfs_filesystem = format!("{zpool}/{vm_uuid}/disk{idx}");
+    let zfs_filesystem = crate::model::disk::disk_dataset(zpool, vm_uuid, idx, brand);
     let raw_path = format!("/dev/zvol/rdsk/{zfs_filesystem}");
     // refreservation arrives in MiB; reject an overflow rather than wrap to
     // a tiny byte count that would silently under-reserve the zvol.
@@ -768,6 +796,89 @@ mod tests {
         assert_eq!(jm.quota_gib, 10);
         assert_eq!(jm.limit_priv, vec!["default".to_string()]);
         assert_eq!(jm.dns_domain, "local");
+    }
+
+    #[test]
+    fn kvm_zvols_are_flat_siblings_with_kvm_overhead() {
+        // KVM: zvols are siblings zones/<uuid>-diskN (dash), memory overhead
+        // is 1024 (not bhyve's 1280), and the zoneroot quota default is the
+        // plain 10 GiB (not the bhyve 1 GiB refquota model).
+        let spec = parse(serde_json::json!({
+            "uuid": "11111111-1111-1111-1111-111111111111",
+            "brand": "kvm", "ram": 512, "vcpus": 1,
+            "disks": [{ "boot": true, "model": "virtio",
+                "image_uuid": "6dde8b1a-0780-11e4-a57b-6b7ac24a7cd4",
+                "size": 5120 }]
+        }));
+        assert_eq!(spec.brand, Brand::Kvm);
+        assert_eq!(spec.max_physical_memory_mib, 512 + 1024);
+        assert_eq!(spec.max_locked_memory_mib, 512 + 1024);
+        assert_eq!(spec.quota_gib, 10);
+        // The zoneroot itself stays the plain zones/<uuid> (no -disk suffix).
+        assert_eq!(
+            spec.zfs_filesystem,
+            "zones/11111111-1111-1111-1111-111111111111"
+        );
+        // The disk is a FLAT SIBLING with a dash, not a child of the root.
+        assert_eq!(spec.disks.len(), 1);
+        assert_eq!(
+            spec.disks[0].zfs_filesystem,
+            "zones/11111111-1111-1111-1111-111111111111-disk0"
+        );
+        assert_eq!(
+            spec.disks[0].raw_path,
+            "/dev/zvol/rdsk/zones/11111111-1111-1111-1111-111111111111-disk0"
+        );
+        // The image stays on the disk; no top-level image_uuid was set.
+        assert_eq!(spec.image_uuid, None);
+        assert_eq!(
+            spec.disks[0].image_uuid.map(|u| u.to_string()).as_deref(),
+            Some("6dde8b1a-0780-11e4-a57b-6b7ac24a7cd4")
+        );
+    }
+
+    #[test]
+    fn kvm_rejects_bhyve_only_disk_model() {
+        // nvme is valid for bhyve but NOT kvm (kvm: virtio/scsi/ide).
+        let p = VmadmCreatePayload::from_json_slice(
+            serde_json::json!({
+                "brand": "kvm", "ram": 512,
+                "disks": [{ "boot": true, "model": "nvme", "size": 1024 }]
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        assert!(normalize(p, epoch()).is_err());
+        // scsi is kvm-valid but NOT bhyve-valid.
+        let p = VmadmCreatePayload::from_json_slice(
+            serde_json::json!({
+                "brand": "bhyve", "ram": 512,
+                "disks": [{ "boot": true, "model": "scsi", "size": 1024 }]
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        assert!(normalize(p, epoch()).is_err());
+    }
+
+    #[test]
+    fn kvm_top_level_image_uuid_stays_for_spice_root() {
+        // Unlike bhyve (which pushes a top-level image onto disk0), kvm keeps
+        // a top-level image_uuid for the SPICE-root install (-t/-x nodataset).
+        let spec = parse(serde_json::json!({
+            "uuid": "11111111-1111-1111-1111-111111111111",
+            "brand": "kvm", "ram": 512,
+            "image_uuid": "6dde8b1a-0780-11e4-a57b-6b7ac24a7cd4",
+            "disks": [{ "boot": true, "model": "virtio", "size": 5120 }]
+        }));
+        assert_eq!(
+            spec.image_uuid.map(|u| u.to_string()).as_deref(),
+            Some("6dde8b1a-0780-11e4-a57b-6b7ac24a7cd4")
+        );
+        // The disk's own image_uuid was NOT populated from the top level.
+        assert_eq!(spec.disks[0].image_uuid, None);
     }
 
     #[test]

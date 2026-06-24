@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -74,6 +74,9 @@ pub struct Registry {
 pub struct DisplaySpec {
     pub uuid: String,
     pub zonepath: PathBuf,
+    /// The brand, so the display proxy knows whether to push the password
+    /// into the guest via QMP (kvm) before binding the listener.
+    pub brand: String,
     pub state: String,
     pub zone_state: String,
     pub vnc_port: i64,
@@ -109,6 +112,7 @@ impl DisplaySpec {
         Some(Self {
             uuid,
             zonepath,
+            brand: str_field(obj, "brand"),
             state: str_field(obj, "state"),
             zone_state: str_field(obj, "zone_state"),
             vnc_port: obj.get("vnc_port").and_then(Value::as_i64).unwrap_or(0),
@@ -198,11 +202,18 @@ impl Registry {
             return;
         }
 
-        // TODO(P9-KVM): before listening, push the display password into the
-        // guest via QMP set_password on <zonepath>/root/tmp/vm.qmp
-        // (setRemoteDisplayPassword, vmadmd.js:218). For bhyve the password is
-        // still surfaced in `vmadm info` but the in-zone vm.vnc socket does
-        // not enforce it; KVM/SPICE wiring lands with the QMP client in P9.
+        // For kvm, push the display password into the guest via QMP
+        // `set_password` BEFORE binding the listener (setRemoteDisplayPassword,
+        // vmadmd.js:218/334). qemu enforces the password on the in-zone vm.vnc/
+        // vm.spice socket; bhyve has no QMP monitor, so its password is only
+        // surfaced in `vmadm info` (the in-zone socket does not enforce it).
+        let proto_str = if protocol == DisplayProtocol::Vnc { "vnc" } else { "spice" };
+        if spec.brand == "kvm"
+            && let Some(pw) = &password
+            && !pw.is_empty()
+        {
+            set_remote_display_password(&spec.zonepath, proto_str, pw).await;
+        }
 
         let bind_port = u16::try_from(port).unwrap_or(0);
         let bind_addr = SocketAddr::new(admin_ip, bind_port);
@@ -224,7 +235,7 @@ impl Registry {
 
         let sock = sockpath.clone();
         let uuid = spec.uuid.clone();
-        let proto_name = if protocol == DisplayProtocol::Vnc { "vnc" } else { "spice" };
+        let proto_name = proto_str;
         let task = tokio::spawn(accept_loop(listener, sock, uuid.clone(), proto_name));
 
         let display = if actual.port() >= 5900 {
@@ -490,6 +501,27 @@ async fn console_handshake(cons: &mut UnixStream) -> Result<(), String> {
     } else {
         Err(format!("unexpected handshake reply: {}", &reply[..reply.len().min(100)]))
     }
+}
+
+/// node `setRemoteDisplayPassword` (vmadmd.js:218): connect the guest's QMP
+/// monitor and send `set_password {protocol, password}`. Best-effort — node
+/// only logs a warning on failure (the listener still binds), so a QMP error
+/// here does not abort the proxy spawn.
+async fn set_remote_display_password(zonepath: &Path, protocol: &str, password: &str) {
+    let socket = crate::qmp::qmp_socket_path(zonepath);
+    let mut qmp = match crate::qmp::Qmp::connect(&socket).await {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::warn!(protocol, error = %e, "qmp connect for set_password failed");
+            return;
+        }
+    };
+    let args = json!({ "protocol": protocol, "password": password });
+    match qmp.command("set_password", Some(args)).await {
+        Ok(_) => tracing::debug!(protocol, "set display password via QMP"),
+        Err(e) => tracing::warn!(protocol, error = %e, "QMP set_password failed"),
+    }
+    qmp.disconnect().await;
 }
 
 /// Bidirectionally copy bytes between a TCP client and a unix-socket display

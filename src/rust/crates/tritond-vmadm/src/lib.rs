@@ -26,6 +26,7 @@ pub mod model;
 pub mod payload;
 pub mod quota;
 pub mod seed;
+pub mod startvm;
 pub mod zonecfg;
 
 pub use backend::{HostBackend, HostNicTagRegistrar, NicTagRegistrar, ZoneHost};
