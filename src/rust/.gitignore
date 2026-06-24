@@ -1,3 +1,5 @@
-# Build output only. vendor/ is intentionally committed for a hermetic,
-# network-independent platform build (`cargo build --offline --locked`).
+# Build output and the regenerable offline dependency tree.
+# vendor/ is produced by `gmake vendor` (cargo vendor) when an offline build
+# is needed; it is not committed (~99MB, mostly unused cfg-gated crates).
 /target
+/vendor

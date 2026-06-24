@@ -12,12 +12,13 @@ CARGO ?=		cargo
 CARGO_TARGET ?=		x86_64-unknown-illumos
 RUST_RELEASE_DIR =	target/$(CARGO_TARGET)/release
 
-# Hermetic build: vendor/ is committed and .cargo/config.toml redirects
-# crates.io to it. --offline forbids any network access; --locked pins
-# Cargo.lock (commit it with every dependency change).
-CARGO_BUILD_FLAGS =	--release --target $(CARGO_TARGET) --offline --locked
+# Dependencies are pinned by Cargo.lock (--locked) and fetched from crates.io.
+# vendor/ is not committed; for a fully offline build run `gmake vendor` and
+# uncomment the vendored-sources redirect in .cargo/config.toml, then add
+# --offline here.
+CARGO_BUILD_FLAGS =	--release --target $(CARGO_TARGET) --locked
 
-.PHONY: all check test clean
+.PHONY: all check test clean vendor
 
 all:
 	$(CARGO) build $(CARGO_BUILD_FLAGS)
@@ -33,3 +34,8 @@ test:
 
 clean:
 	$(CARGO) clean
+
+# Regenerate the offline dependency tree (not committed). After this, enable
+# the vendored-sources redirect in .cargo/config.toml for `--offline` builds.
+vendor:
+	$(CARGO) vendor vendor

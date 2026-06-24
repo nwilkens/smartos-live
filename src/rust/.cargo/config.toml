@@ -1,12 +1,16 @@
-# Hermetic build configuration for the SmartOS platform image.
-# vendor/ is committed so `cargo build --offline --locked` needs no network.
-# Generated with `cargo vendor vendor`; refresh both together.
+# Build configuration for the SmartOS platform-image Rust tools.
+#
+# Dependencies are pinned by Cargo.lock and fetched from crates.io at build
+# time. vendor/ is NOT committed (it is ~99MB, mostly cfg-gated Windows/wasm
+# crates that never build on illumos). For a fully offline/hermetic build,
+# run `gmake vendor` (or `cargo vendor vendor`) and uncomment the
+# vendored-sources redirect below.
 
 [build]
 target = "x86_64-unknown-illumos"
 
-[source.crates-io]
-replace-with = "vendored-sources"
-
-[source.vendored-sources]
-directory = "vendor"
+# [source.crates-io]
+# replace-with = "vendored-sources"
+#
+# [source.vendored-sources]
+# directory = "vendor"
