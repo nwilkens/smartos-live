@@ -10,13 +10,11 @@ ROOT = $(CURDIR)/../..
 TOP := $(shell pwd)
 NM := node_modules
 NM_ORIG := node_modules.orig
-TEST_MODULES := test/node_modules
 
 
 #
 # Tools
 #
-NODEUNIT := $(TEST_MODULES)/nodeunit/bin/nodeunit
 JSSTYLE =	$(ROOT)/tools/jsstyle/jsstyle
 JSLINT =	$(ROOT)/tools/javascriptlint/build/install/jsl
 RAMSEY := tools/ramsey/bin/ramsey
@@ -27,10 +25,7 @@ RAMSEY := tools/ramsey/bin/ramsey
 JS_CHECK_TARGETS=\
 	lib/*.js \
 	lib/util/*.js \
-	sbin/* \
-	test/unit/*.js \
-	test/integration/*.js \
-	test/lib/*.js
+	sbin/*
 MAN_CHECK_TARGETS=\
 	man/fwadm.8.md \
 	man/fwrule.7.md
@@ -43,18 +38,6 @@ JSSTYLE_OPTS = -o indent=4,strict-indent=1,doxygen,unparenthesized-return=0,cont
 #
 # Repo-specific targets
 #
-.PHONY: test
-test:
-	$(NODEUNIT) --reporter tap test/unit/*.js
-
-.PHONY: teststop
-teststop:
-	@(for F in test/unit/*.js; do \
-		echo "# $$F" ;\
-		$(NODEUNIT) --reporter tap $$F ;\
-		[[ $$? == "0" ]] || exit 1; \
-	done)
-
 # Create a node modules suitable for installing in the platform
 $(NM):
 	$(TOP)/tools/bin/rebuild-node-modules

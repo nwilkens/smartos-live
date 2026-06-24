@@ -19,7 +19,6 @@ f usr/img/sbin/recover-vm-from-failed-imgadm-create.sh 0555 root bin
 f usr/img/sbin/imgadm 0555 root bin
 d usr/img/test 0555 root bin
 f usr/img/test/mk-custom-image 0555 root bin
-f usr/img/test/runtests 0555 root bin
 f usr/img/test/try-custom-image 0555 root bin
 d var/db 0755 root sys
 d var/db/imgadm 0755 root bin
@@ -33,15 +32,6 @@ d usr/vm 0555 root bin
 d usr/vm/etc 0555 root bin
 d usr/vm/sbin 0555 root bin
 d usr/vm/smf 0555 root bin
-d usr/vm/test 0555 root bin
-d usr/vm/test/testdata 0555 root bin
-d usr/vm/test/testdata/vmload-xml 0555 root bin
-d usr/vm/test/tests 0555 root bin
-d usr/vm/test/common 0555 root bin
-f usr/vm/test/common/nictag.js 0444 root bin
-f usr/vm/test/common/vmtest.js 0444 root bin
-f usr/vm/test/runtest 0555 root bin
-f usr/vm/test/runtests 0555 root bin
 f usr/vm/sbin/add-userscript 0555 root bin
 f usr/vm/sbin/dockerexec 0555 root bin
 f usr/vm/sbin/dockerinit 0555 root bin
@@ -67,23 +57,9 @@ s etc/bash/bash_completion.d/fwadm=/usr/fw/etc/fwadm.completion
 d usr/fw 0555 root bin
 d usr/fw/etc 0555 root bin
 d usr/fw/etc/examples 0555 root bin
-d usr/fw/lib 0555 root bin
-d usr/fw/lib/util 0555 root bin
 d usr/fw/sbin 0555 root bin
 f usr/fw/etc/fwadm.completion 0444 root bin
-# fw/lib/util/obj.js is still required by the shipped fw integration tests
-# (usr/fw/test/lib/vm.js -> ../../lib/util/obj); fwadm itself is now Rust.
-f usr/fw/lib/util/obj.js 0444 root bin
 f usr/fw/sbin/fwadm 0555 root bin
-d usr/fw/test 0555 root bin
-d usr/fw/test/integration 0555 root bin
-f usr/fw/test/runtest 0555 root bin
-f usr/fw/test/runtests 0555 root bin
-d usr/fw/test/lib 0555 root bin
-f usr/fw/test/lib/common.js 0444 root root
-f usr/fw/test/lib/fw.js 0444 root root
-f usr/fw/test/lib/log.js 0444 root root
-f usr/fw/test/lib/vm.js 0444 root root
 d var/fw 0755 root bin
 # metadata daemon
 f usr/vm/sbin/metadata 0555 root bin

@@ -1,0 +1,80 @@
+.\" Generated with Ronnjs/v0.1
+.\" http://github.com/kapouer/ronnjs/
+.
+.TH "SYSEVENT" "8" "June 2026" "" ""
+.
+.SH "NAME"
+\fBsysevent\fR \-\- Sysevent watcher
+.
+.SH "SYNOPSIS"
+.
+.nf
+sysevent [\-j] [class] [subclass1] [subclass2] [\.\.\.]
+.
+.fi
+.
+.SH "DESCRIPTION"
+The \fBsysevent(8)\fR tool allows watching for arbitrary sysevents from both the
+kernel and userland programs\.  This program will run indefinitely, emitting
+output on stdout whenever a sysevent is generated\.  This is a debugging tool;
+options and output are still evolving and may change in the future\.
+.
+.P
+Optionally, a class can be specified as the first operand to limit which
+sysevents will be watched, as well as subclasses specified as the
+subsequent operands to further limit the matching events\.
+.
+.P
+By default the output is meant to be consumed by humans and is not easily
+parseable \- passing \fB\-j\fR will cause the program to emit newline separated
+JSON to stdout instead for easy machine parsing\.
+.
+.SH "GENERAL OPTIONS"
+\fB\-c <channel>\fR
+    Bind to the event channel\.
+.
+.P
+\fB\-h\fR
+    Print help and exit\.
+.
+.P
+\fB\-j\fR
+    JSON output\.
+.
+.P
+\fB\-r\fR
+    Print \'ready\' event at start\.
+.
+.SH "EXAMPLES"
+\fBsysevent\fR
+    Watch for all sysevents on a system and print human\-readable
+    output\.
+.
+.P
+\fBsysevent \-j\fR
+    Same as above, but print newline separated JSON output\.
+.
+.P
+\fBsysevent EC_zfs\fR
+    Watch for all events related to ZFS\.
+.
+.P
+\fBsysevent EC_zfs ESC_ZFS_history_event\fR
+    Watch for only ZFS command events (streaming \fBzpool history\fR
+    effectively)\.
+.
+.P
+\fBsysevent \-c com\.sun:zones:status status\fR
+    Watch for only "status" class events in the zones channel
+.
+.SH "NOTES"
+.
+.IP "\(bu" 4
+This tool does not work at all in non\-global zones\.
+.
+.IP "\(bu" 4
+The \fBtime\fR attribute for each event represents when the event was received by
+this tool, not necessarily when the event was generated\.
+.
+.IP "" 0
+

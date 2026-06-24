@@ -1476,6 +1476,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "net-boot-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
+]
+
+[[package]]
 name = "notify"
 version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

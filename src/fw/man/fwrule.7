@@ -1,0 +1,638 @@
+.\" Generated with Ronnjs/v0.1
+.\" http://github.com/kapouer/ronnjs/
+.
+.TH "FWRULE" "7" "June 2026" "" ""
+.
+.SH "NAME"
+\fBfwrule\fR \-\- SmartOS fwadm firewall rule syntax
+.
+.SH "OVERVIEW"
+The base policy for a VM with its firewall enabled is:
+.
+.IP "\(bu" 4
+block all inbound traffic
+.
+.IP "\(bu" 4
+allow all outbound traffic
+.
+.IP "" 0
+.
+.P
+All firewall rules applied to a VM are applied on top of those defaults\.
+Firewall rules can affect one VM (using the vm target) or many (using the
+tag or all vms target types)\.
+.
+.P
+Adding and updating rules takes effect immediately\.  Adding or removing
+tags on a VM causes rules that apply to those tags to be added or removed
+immediately\.
+.
+.P
+In the case of two rules that affect the same VM and port, the rule that
+goes counter to the default policy takes precedence\.  This means:
+.
+.IP "\(bu" 4
+If you have an incoming BLOCK and an incoming ALLOW rule for the
+same VM and port, the ALLOW will override\.
+.
+.IP "\(bu" 4
+If you have an outgoing BLOCK and an outgoing ALLOW rule for the
+same VM and port, the BLOCK will override\.
+.
+.IP "" 0
+.
+.SH "RULE PAYLOAD"
+Rules are created and updated using a JSON payload as in this example:
+.
+.IP "" 4
+.
+.nf
+{
+    "rule": "FROM any TO all vms ALLOW tcp port 22",
+    "enabled": true,
+    "owner_uuid": "5c3ea269\-75b8\-42fa\-badc\-956684fb4d4e"
+}
+.
+.fi
+.
+.IP "" 0
+.
+.P
+The properties of this payload are:
+.
+.IP "\(bu" 4
+\fBrule\fR (required): the firewall rule\.  See the Rule Syntax section below
+for the syntax\.
+.
+.IP "\(bu" 4
+\fBenabled\fR (boolean, optional): If set to true, the rule will be applied
+to VMs\.  If set to false, the rule will be added but not applied\.
+.
+.IP "\(bu" 4
+\fBglobal\fR (boolean, optional): If set, the rule will be applied to all VMs
+in the datacenter, regardless of owner\.
+.
+.IP "\(bu" 4
+\fBowner_uuid\fR (UUID, optional): If set, restricts the set of VMs that
+the rule can be applied to VMs owned by this UUID\.
+.
+.IP "" 0
+.
+.P
+Note that only one of \fBowner_uuid\fR or \fBglobal\fR can be set at a time for
+a rule\.
+.
+.SH "RULE SYNTAX"
+Firewall rules are in the following format:
+.
+.IP "" 4
+.
+.nf
+FROM <from targets> TO <to targets> <action> <protocol> \\
+     <ports or types>
+.
+.fi
+.
+.IP "" 0
+.
+.P
+The parameters are the following:
+.
+.P
+\fBfrom targets\fR and \fBto targets\fR can be any of the following types
+(see the Target Types section below):
+.
+.IP "\(bu" 4
+vm <uuid>
+.
+.IP "\(bu" 4
+ip <IPv4 or IPv6 address>
+.
+.IP "\(bu" 4
+subnet <subnet CIDR>
+.
+.IP "\(bu" 4
+tag <tag name>
+.
+.IP "\(bu" 4
+tag <tag name>=<tag value>
+.
+.IP "\(bu" 4
+a target list of up to 32 of the above
+.
+.IP "\(bu" 4
+all vms
+.
+.IP "\(bu" 4
+any
+.
+.IP "" 0
+.
+.P
+\fBaction\fR can be one of (see the Actions section below):
+.
+.IP "\(bu" 4
+ALLOW
+.
+.IP "\(bu" 4
+BLOCK
+.
+.IP "" 0
+.
+.P
+\fBprotocol\fR can be one of (see the Protocols section below):
+.
+.IP "\(bu" 4
+tcp
+.
+.IP "\(bu" 4
+udp
+.
+.IP "\(bu" 4
+icmp
+.
+.IP "\(bu" 4
+icmp6
+.
+.IP "" 0
+.
+.P
+\fBports\fR or \fBtypes\fR can be one of (see the Ports section below):
+.
+.IP "\(bu" 4
+port <port number> (if protocol is tcp or udp)
+.
+.IP "\(bu" 4
+ports <port numbers and ranges> (if protocol is tcp or udp)
+.
+.IP "\(bu" 4
+type <ICMP type> (if protocol is icmp)
+.
+.IP "\(bu" 4
+type <ICMP type> code <ICMP code> (if protocol is icmp)
+.
+.IP "" 0
+.
+.P
+The limits for the parameters are:
+.
+.IP "\(bu" 4
+24 from targets
+.
+.IP "\(bu" 4
+24 to targets
+.
+.IP "\(bu" 4
+8 ports or types
+.
+.IP "" 0
+.
+.SH "TARGET TYPES"
+.
+.SS "vm"
+.
+.nf
+vm <uuid>
+.
+.fi
+.
+.P
+Targets the VM with that UUID\.
+.
+.P
+\fBExample:\fR
+.
+.IP "" 4
+.
+.nf
+FROM any to vm 04128191\-d2cb\-43fc\-a970\-e4deefe970d8 ALLOW tcp port 80
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Allows HTTP traffic from any host to VM 04128\.\.\.
+.
+.SS "ip"
+.
+.nf
+ip <IP address>
+.
+.fi
+.
+.P
+Targets the specified IPv4 or IPv6 address\.
+.
+.P
+\fBExample:\fR
+.
+.IP "" 4
+.
+.nf
+FROM all vms to (ip 10\.2\.0\.1 OR ip fd22::1234) BLOCK tcp port 25
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Blocks SMTP traffic to that IP\.
+.
+.SS "subnet"
+.
+.nf
+subnet <subnet CIDR>
+.
+.fi
+.
+.P
+Targets the specified IPv4 or IPv6 subnet range\.
+.
+.P
+\fBExample:\fR
+.
+.IP "" 4
+.
+.nf
+FROM subnet 10\.8\.0\.0/16 TO vm 0f570678\-c007\-4610\-a2c0\-bbfcaab9f4e6 ALLOW \\
+     tcp port 443
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Allows HTTPS traffic from a private IPv4 /16 to the specified VM\.
+.
+.P
+\fBExample:\fR
+.
+.IP "" 4
+.
+.nf
+FROM subnet fd22::/64 TO vm 0f570678\-c007\-4610\-a2c0\-bbfcaab9f4e6 ALLOW \\
+     tcp port 443
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Allows HTTPS traffic from a private IPv6 /64 to the specified VM\.
+.
+.SS "tag"
+.
+.nf
+tag <name>
+tag <name> = <value>
+tag "<name with spaces>" = "<value with spaces>"
+.
+.fi
+.
+.P
+Targets all VMs with the specified tag, or all VMs with the specified tag
+and value\.  Both tag name and value can be quoted if they contain spaces\.
+.
+.P
+\fBExamples:\fR
+.
+.IP "" 4
+.
+.nf
+FROM all vms TO tag syslog ALLOW udp port 514
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Allows syslog traffic from all VMs to syslog servers\.
+.
+.IP "" 4
+.
+.nf
+FROM tag role = db TO tag role = www ALLOW tcp port 5432
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Allows database traffic from databases to webservers\. All other VMs with
+role tags (role = staging, for example) will not be affected by this rule\.
+.
+.IP "" 4
+.
+.nf
+FROM all vms TO tag "VM type" = "LDAP server" ALLOW tcp PORT 389
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Allow LDAP access from all VMs to LDAP servers\.
+.
+.SS "all vms"
+.
+.nf
+all vms
+.
+.fi
+.
+.P
+Targets all VMs\.
+.
+.P
+\fBExample:\fR
+.
+.IP "" 4
+.
+.nf
+FROM all vms TO all vms ALLOW tcp port 22
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Allows ssh traffic between all VMs\.
+.
+.SS "any"
+.
+.nf
+any
+.
+.fi
+.
+.P
+Targets any host (any IPv4 address)\.
+.
+.P
+\fBExample:\fR
+.
+.IP "" 4
+.
+.nf
+FROM any TO all vms ALLOW tcp port 80
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Allows HTTP traffic from any IP to all VMs\.
+.
+.SS "target list"
+.
+.nf
+( <target> OR <target> OR \.\.\. )
+.
+.fi
+.
+.P
+The vm, ip, subnet and tag target types can be combined into a list surrounded
+by parentheses and joined by OR\.
+.
+.P
+\fBExample:\fR
+.
+.IP "" 4
+.
+.nf
+FROM (vm 163dcedb\-828d\-43c9\-b076\-625423250ee2 OR tag db) TO (subnet \\
+     10\.2\.2\.0/24 OR ip 10\.3\.0\.1) BLOCK tcp port 443
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Blocks HTTPS traffic to an internal subnet and IP\.
+.
+.SH "ACTIONS"
+.
+.nf
+ALLOW
+BLOCK
+.
+.fi
+.
+.P
+Actions can be one of ALLOW or BLOCK\.  Note that certain combinations of
+actions and directions will essentially have no effect on the behaviour
+of a VM\'s firewall\.  For example:
+.
+.IP "" 4
+.
+.nf
+FROM any TO all vms BLOCK tcp port 143
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Since the default rule set blocks all incoming ports, this rule doesn\'t
+really have an effect on the VMs\.  Another example:
+.
+.IP "" 4
+.
+.nf
+FROM all vms TO any ALLOW tcp port 25
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Since the default policy allows all outbound traffic, this rule doesn\'t
+have an effect\.
+.
+.SH "PROTOCOLS"
+.
+.nf
+tcp
+udp
+icmp
+icmp6
+.
+.fi
+.
+.P
+The protocol can be one of tcp, udp or icmp(6)\. The protocol dictates whether
+ports or types can be used (see the Ports section below)\.
+.
+.SH "PORTS"
+.
+.nf
+port <port number>
+( port <port number> AND port <port number> \.\.\. )
+ports <port number or range>
+ports <port number or range>, <port number or range>, \.\.\.
+type <icmp type>
+type <icmp type> code <icmp code>
+( type <icmp type> AND type <icmp type> code <icmp code> AND \.\.\. )
+.
+.fi
+.
+.P
+For TCP and UDP, this specifies the port numbers that the rule applies to\.
+Port numbers must be between 1 and 65535, inclusive\. Ranges are written as two
+port numbers separated by a \- (hyphen), with the lower number coming first, with
+optional spaces around the hyphen\. Port ranges are inclusive, so writing the
+range "20 \- 22" would cause the rule to apply to the ports 20, 21 and 22\.
+.
+.P
+For ICMP, this specifies the ICMP type and optional code that the rule
+applies to\.  Types and codes must be between 0 and 255, inclusive\.
+.
+.P
+\fBExamples:\fR
+.
+.IP "" 4
+.
+.nf
+FROM tag www TO any ALLOW tcp (port 80 AND port 443)
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Allows HTTP and HTTPS traffic from any IP to all webservers\.
+.
+.IP "" 4
+.
+.nf
+FROM tag www TO any ALLOW tcp ports 80, 443, 8000\-8100
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Allows traffic on HTTP, HTTPS and common alternative HTTP ports from any IP to
+all webservers\.
+.
+.IP "" 4
+.
+.nf
+FROM any TO all vms ALLOW icmp TYPE 8 CODE 0
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Allows pinging all VMs\. The IPv6 equivalent would be:
+.
+.IP "" 4
+.
+.nf
+FROM any TO all vms ALLOW icmp6 TYPE 128 CODE 0
+.
+.fi
+.
+.IP "" 0
+.
+.P
+And to block outgoing replies:
+.
+.IP "" 4
+.
+.nf
+FROM all vms TO any BLOCK icmp TYPE 0
+FROM all vms TO any BLOCK icmp6 TYPE 129
+.
+.fi
+.
+.IP "" 0
+.
+.SH "EXAMPLES"
+.
+.nf
+FROM all vms TO tag syslog ALLOW udp port 514
+.
+.fi
+.
+.P
+Allows syslog traffic from all VMs to syslog servers\.
+.
+.IP "" 4
+.
+.nf
+FROM tag role = db TO tag role = www ALLOW tcp port 5432
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Allows database traffic from databases to webservers\.
+.
+.IP "" 4
+.
+.nf
+FROM all vms TO all vms ALLOW tcp port 22
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Allows ssh traffic between all VMs\.
+.
+.IP "" 4
+.
+.nf
+FROM any TO all vms ALLOW tcp port 80
+.
+.fi
+.
+.IP "" 0
+.
+.P
+Allow HTTP traffic from any host to all VMs\.
+.
+.SH "ERROR MESSAGES"
+This section explains error messages\.
+.
+.SS "rule does not affect VMs"
+The rule you\'re trying to create doesn\'t contain any targets that will
+actually cause rules to be applied to VMs\.  Targets that will cause rules
+to be applied are:
+.
+.IP "\(bu" 4
+tag
+.
+.IP "\(bu" 4
+vm
+.
+.IP "\(bu" 4
+all vms
+.
+.IP "" 0
+.
+.P
+Some examples of rules that would cause this message include:
+.
+.IP "" 4
+.
+.nf
+FROM any TO any ALLOW tcp port 22
+
+FROM ip 192\.168\.1\.3 TO subnet 192\.168\.1\.0/24 ALLOW tcp port 22
+.
+.fi
+.
+.IP "" 0
+.
+.SH "SEE ALSO"
+.
+.nf
+ipfilter(7), vmadm(8), ipf(8), fwadm(8)
+.
+.fi
+

@@ -3,7 +3,9 @@ smartos-live itself.  For mainly historical reasons, some of these live under
 /smartdc/man, although they're still delivered into SmartOS, not just a Triton
 build.
 
-Some are built from markdown via ronnjs, others not.
+Man pages ship as pre-rendered roff. Those with a .md source were rendered
+once with tools/ronnjs and the roff committed alongside the .md; regenerate
+out-of-band if the markdown changes.
 
 In addition, there are some waifs and strays - such as the bzip2 manpages -
 that are referenced from manifests other than man/manifest, and mainly here for

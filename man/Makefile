@@ -4,8 +4,12 @@
 #
 
 ROOT = $(PWD)/..
-RONNJS = /opt/local/bin/node $(ROOT)/tools/ronnjs/bin/ronn.js
 DESTDIR = $(ROOT)/proto
+
+#
+# Man pages ship as pre-rendered roff committed alongside their .md sources.
+# Regenerate with tools/ronnjs out-of-band if a .md changes.
+#
 
 MAN_FILES = \
 	smartdc/man/man1/pkgsrc-setup.1 \
@@ -57,27 +61,26 @@ $(DESTDIR)/%: %
 	cp $< $@
 	touch $@
 
-$(DESTDIR)/%: %.md
+$(DESTDIR)/usr/share/man/man8/%: $(ROOT)/src/fw/man/%
 	mkdir -p $(@D)
 	rm -f $@
-	$(RONNJS) --roff $< > $@
+	cp $< $@
+	touch $@
 
-$(DESTDIR)/usr/share/man/man8/%: $(ROOT)/src/fw/man/%.md
+$(DESTDIR)/usr/share/man/man7/%: $(ROOT)/src/fw/man/%
 	mkdir -p $(@D)
 	rm -f $@
-	$(RONNJS) --roff $< > $@
+	cp $< $@
+	touch $@
 
-$(DESTDIR)/usr/share/man/man7/%: $(ROOT)/src/fw/man/%.md
+$(DESTDIR)/usr/share/man/man8/%: $(ROOT)/src/img/man/%
 	mkdir -p $(@D)
 	rm -f $@
-	$(RONNJS) --roff $< > $@
+	cp $< $@
+	touch $@
 
-$(DESTDIR)/usr/share/man/man8/%: $(ROOT)/src/img/man/%.md
+$(DESTDIR)/usr/share/man/man8/%: $(ROOT)/src/vm/man/%
 	mkdir -p $(@D)
 	rm -f $@
-	$(RONNJS) --roff $< > $@
-
-$(DESTDIR)/usr/share/man/man8/%: $(ROOT)/src/vm/man/%.md
-	mkdir -p $(@D)
-	rm -f $@
-	$(RONNJS) --roff $< > $@
+	cp $< $@
+	touch $@
