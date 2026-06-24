@@ -28,6 +28,8 @@ members = [
     "crates/metadata",
     "crates/vmadmd",
     "crates/fwadm",
+    "crates/imgapi-manifest",
+    "crates/imgadm",
 ]
 
 [workspace.package]
@@ -46,6 +48,7 @@ expect_used = "deny"
 # intra-workspace (path) crates
 tritond-cn-platform = { path = "crates/tritond-cn-platform" }
 tritond-vmadm = { path = "crates/tritond-vmadm" }
+imgapi-manifest = { path = "crates/imgapi-manifest" }
 
 # crates.io
 anyhow = "1.0"
@@ -74,6 +77,15 @@ hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
 tower = "0.5"
 futures = "0.3"
+# imgadm: IMGAPI v2 HTTP client + zfs-recv pipeline.
+# rustls-tls (webpki-roots) avoids OpenSSL and the host CA store; the
+# bundled Mozilla root set validates images.smartos.org directly.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "stream", "json", "gzip"] }
+flate2 = "1.0"
+sha1 = "0.10"
+fd-lock = "4"
+bytes = "1"
+futures-util = "0.3"
 
 # Release binaries ship in the PI; abort keeps them small and avoids
 # unwinding through the illumos C boundary. The test profile keeps the
