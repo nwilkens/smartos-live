@@ -78,8 +78,7 @@ SYSINFO_MOD_DIR = $(DESTDIR)/usr/lib/sysevent/modules
 
 # These files will get run through jsstyle and jslint on 'make check'
 JS_CHECK_TARGETS=\
-	filewait.js \
-	node_modules/{system,onlyif,net-boot-config}.js \
+	node_modules/{onlyif,net-boot-config}.js \
 	net-boot-config \
 	vm/sbin/*.js \
 	vm/node_modules/diff.js \
@@ -142,13 +141,9 @@ JS_CHECK_TARGETS=\
 	vm/tests/test-vminfod-zpoolwatcher.js \
 	vm/lib/metadata/*.js
 
-JS_CHECK_OLDSKOOL_TARGETS = \
-	disklayout.js \
-	mkzpool.js \
-	smartdc/lib/ntp_config.js \
-	node_modules/disklayout.js
-
-# "json.js" intentionally missing
+# "json.js" and the other standalone scripts (disklayout/mkzpool/filewait/
+# zoneevent/ntp_config) are now native Rust tools; nothing left to lint here.
+JS_CHECK_OLDSKOOL_TARGETS =
 
 # These files will get run through cstyle on 'make check'
 C_CHECK_TARGETS=\

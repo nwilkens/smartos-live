@@ -88,12 +88,7 @@ endif
 CFLAGS =	-std=gnu99 $(WARN_FLAGS) $(OPT_FLAGS)
 CXXFLAGS =	$(WARN_FLAGS) $(OPT_FLAGS)
 
-STD_DEFS =	-D_GNU_SOURCE
-LF64_DEFS =	-D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64
-PIC_DEFS =	-DPIC
-
 SHARED_FLAGS =	-shared
-ZTEXT =		-Wl,-ztext
 
 STRINGS_DIR =	$(BASE)/common/strings
 DOCKER_DIR =	$(BASE)/dockerinit
@@ -103,13 +98,9 @@ INSTALL_PROG =	mkdir -p $(@D) && rm -f $@ && cp $^ $@ && \
 
 COMPILE32.c =	$(GCC) -m32 $(CPPFLAGS) $(CFLAGS) -o $@ -c
 LINK32.c =	$(GCC) -m32 $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@
-COMPILE32.cc =	$(GXX) -m32 $(CPPFLAGS) $(CXXFLAGS) -o $@ -c
-LINK32.cc =	$(GXX) -m32 $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) -o $@
 
 COMPILE64.c =	$(GCC) -m64 $(CPPFLAGS) $(CFLAGS) -o $@ -c
 LINK64.c =	$(GCC) -m64 $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@
-COMPILE64.cc =	$(GXX) -m64 $(CPPFLAGS) $(CXXFLAGS) -o $@ -c
-LINK64.cc =	$(GXX) -m64 $(CPPFLAGS) $(CXXFLAGS) $(LDFLAGS) -o $@
 
 MDATA_OBJS = \
 		mdata_dynstr.o \
