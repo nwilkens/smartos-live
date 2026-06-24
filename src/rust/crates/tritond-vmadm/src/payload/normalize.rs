@@ -49,6 +49,19 @@ pub fn normalize(
         Brand::JoyentMinimal => k::DEFAULT_QUOTA_GIB,
     });
 
+    // tmpfs default (VM.js:4925 applyZoneDefaults): OS brands mount a
+    // tmpfs /tmp sized to max_physical_memory. When the payload omits
+    // tmpfs (or asks for more than max_physical_memory) node clamps it to
+    // max_physical_memory; HVM brands never get a tmpfs attr.
+    let tmpfs_mib = if brand.features().use_tmpfs {
+        match payload.tmpfs {
+            Some(t) if t <= mem.physical => Some(t),
+            _ => Some(mem.physical),
+        }
+    } else {
+        payload.tmpfs
+    };
+
     let nics = normalize_nics(uuid, payload.add_nics.unwrap_or_default())?;
     let mut disks = if brand.is_hvm() {
         normalize_disks(&zpool, uuid, payload.add_disks.unwrap_or_default())?
@@ -98,7 +111,7 @@ pub fn normalize(
         max_physical_memory_mib: mem.physical,
         max_locked_memory_mib: mem.locked,
         max_swap_mib: mem.swap,
-        tmpfs_mib: payload.tmpfs,
+        tmpfs_mib,
         vcpus: payload.vcpus.unwrap_or(1),
         cpu_cap: payload.cpu_cap,
         cpu_shares: payload.cpu_shares.unwrap_or(k::DEFAULT_CPU_SHARES),
@@ -752,6 +765,39 @@ mod tests {
         }))
         .unwrap_err();
         assert!(matches!(err, VmadmError::Payload(_)));
+    }
+
+    #[test]
+    fn tmpfs_defaults_to_max_physical_for_os_brand() {
+        // No tmpfs in payload -> defaults to max_physical_memory.
+        let spec = parse(serde_json::json!({
+            "brand": "joyent-minimal", "max_physical_memory": 1024
+        }));
+        assert_eq!(spec.max_physical_memory_mib, 1024);
+        assert_eq!(spec.tmpfs_mib, Some(1024));
+    }
+
+    #[test]
+    fn tmpfs_clamped_to_max_physical() {
+        // tmpfs > max_physical_memory is clamped down to it.
+        let spec = parse(serde_json::json!({
+            "brand": "joyent-minimal", "max_physical_memory": 512, "tmpfs": 4096
+        }));
+        assert_eq!(spec.tmpfs_mib, Some(512));
+    }
+
+    #[test]
+    fn tmpfs_respected_when_under_max_physical() {
+        let spec = parse(serde_json::json!({
+            "brand": "joyent-minimal", "max_physical_memory": 1024, "tmpfs": 256
+        }));
+        assert_eq!(spec.tmpfs_mib, Some(256));
+    }
+
+    #[test]
+    fn bhyve_never_gets_default_tmpfs() {
+        let spec = parse(serde_json::json!({"brand": "bhyve", "ram": 512}));
+        assert_eq!(spec.tmpfs_mib, None);
     }
 
     #[test]

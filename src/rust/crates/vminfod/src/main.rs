@@ -16,6 +16,7 @@ use std::sync::Arc;
 use clap::Parser;
 use tracing::info;
 use vminfod::Daemon;
+use vminfod::fswatcher::run_fs_watcher;
 use vminfod::loader::full_refresh;
 use vminfod::server::router;
 use vminfod::watcher::{DEFAULT_REFRESH_INTERVAL, run_periodic_refresh, run_zone_watcher};
@@ -50,8 +51,10 @@ async fn main() -> std::process::ExitCode {
         daemon.with_inner(|i| i.cache.len())
     );
 
-    // Watchers: zone state-change sysevents + periodic full refresh.
+    // Watchers: zone state-change sysevents + per-VM fs watcher (instant
+    // mdata visibility) + periodic full refresh.
     tokio::spawn(run_zone_watcher(daemon.clone()));
+    tokio::spawn(run_fs_watcher(daemon.clone()));
     let refresh_interval = if cli.refresh_secs == 0 {
         DEFAULT_REFRESH_INTERVAL
     } else {

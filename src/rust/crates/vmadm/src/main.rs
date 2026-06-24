@@ -131,13 +131,15 @@ async fn main() -> ExitCode {
             timeout,
         } => {
             let t = Duration::from_secs(timeout.unwrap_or(180));
-            run_control("stopped", &uuid, move |u| async move {
+            // node vmadm.js: "Successfully completed stop for VM <uuid>".
+            run_control_msg("completed stop for", &uuid, move |u| async move {
                 tritond_vmadm::lifecycle::stop(&HostBackend::new(), u, force, t).await
             })
             .await
         }
         Command::Reboot { uuid, force, .. } => {
-            run_control("rebooted", &uuid, move |u| async move {
+            // node vmadm.js: "Successfully completed reboot for VM <uuid>".
+            run_control_msg("completed reboot for", &uuid, move |u| async move {
                 tritond_vmadm::lifecycle::reboot(&HostBackend::new(), u, force).await
             })
             .await
@@ -174,8 +176,10 @@ async fn main() -> ExitCode {
 }
 
 /// Parse the uuid arg and run a lifecycle action, mapping the result to an
-/// exit code.
-async fn run_control<F, Fut>(verb: &str, uuid: &str, f: F) -> ExitCode
+/// exit code. On success prints `Successfully <phrase> VM <uuid>` to match
+/// node-vmadm's exact wording (verbs like "started"/"deleted", or phrases
+/// like "completed reboot for").
+async fn run_control_msg<F, Fut>(phrase: &str, uuid: &str, f: F) -> ExitCode
 where
     F: FnOnce(uuid::Uuid) -> Fut,
     Fut: std::future::Future<Output = tritond_vmadm::Result<()>>,
@@ -186,11 +190,20 @@ where
     };
     match f(parsed).await {
         Ok(()) => {
-            println!("Successfully {verb} VM {parsed}");
+            println!("Successfully {phrase} VM {parsed}");
             ExitCode::SUCCESS
         }
         Err(e) => fail(&format!("{e}")),
     }
+}
+
+/// Alias for the `Successfully <verb> VM` form (start/delete).
+async fn run_control<F, Fut>(verb: &str, uuid: &str, f: F) -> ExitCode
+where
+    F: FnOnce(uuid::Uuid) -> Fut,
+    Fut: std::future::Future<Output = tritond_vmadm::Result<()>>,
+{
+    run_control_msg(verb, uuid, f).await
 }
 
 async fn create(file: Option<PathBuf>) -> ExitCode {

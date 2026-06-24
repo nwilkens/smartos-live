@@ -61,6 +61,10 @@ const KEY_ORDER: &[&str] = &[
     "zoneid",
     "zonedid",
     "last_modified",
+    // exit_status/exit_timestamp are inserted by vmload right after
+    // last_modified (index.js:822/838), only for non-running zones.
+    "exit_status",
+    "exit_timestamp",
     "firewall_enabled",
     "server_uuid",
     "platform_buildstamp",

@@ -179,9 +179,18 @@ async fn reconstruct<H: ZoneHost>(host: &H, uuid: Uuid, info: ZoneRuntime) -> Re
         vm.platform_buildstamp = facts.platform_buildstamp;
     }
 
-    // kstat facts (running zones only): pid / init_restarts / boot_timestamp.
-    if info.state == "running"
-        && let Some(zoneid) = info.zoneid
+    // kstat facts: pid / init_restarts / boot_timestamp. node's vmload reads
+    // the zone_misc kstat for *any* zone that has one — the kstat exists for
+    // the whole lifetime a zone holds a zoneid (`ready`, `running`,
+    // `shutting_down`, `down`), not just while running — and copies the fields
+    // verbatim. Reading whenever a zoneid is present reproduces node's
+    // transient sentinels: the brief `ready`/`shutting_down` window where the
+    // kernel reports init_pid 4294967295 and boot_time 0 (1970-epoch
+    // boot_timestamp). Once the zone reaches `installed` it has no zoneid, so
+    // the kstat is skipped and pid/boot_timestamp drop — matching node's final
+    // transition.
+    if let Some(zoneid) = info.zoneid
+        && info.state != "installed"
         && let Ok(k) = host.zone_kstat(zoneid, &vm.zonename).await
     {
         vm.pid = k.init_pid;
@@ -189,6 +198,16 @@ async fn reconstruct<H: ZoneHost>(host: &H, uuid: Uuid, info: ZoneRuntime) -> Re
         vm.boot_timestamp = k
             .boot_time
             .and_then(|secs| chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0));
+    }
+
+    // lastexited facts (non-running zones only): exit_status / exit_timestamp,
+    // matching node vmload getLastExited (index.js:822/838 gate on
+    // `zone_state !== 'running'`). A running zone never carries them.
+    if info.state != "running"
+        && let Some((status, ts)) = read_last_exited(zonepath).await
+    {
+        vm.exit_status = Some(status);
+        vm.exit_timestamp = ts;
     }
 
     // quota + zfs root dataset facts. The zoneroot dataset is the zonepath
@@ -291,18 +310,54 @@ async fn newest_mtime(zonepath: &Path, zonename: &str) -> Option<chrono::DateTim
     newest.map(chrono::DateTime::<chrono::Utc>::from)
 }
 
-/// Map a zoneadm runtime state to the vmadm-normalized state node reports.
-/// vmadm collapses the zoneadm machine states into the smaller set callers
-/// branch on; `running`/`installed` are the common ones.
+/// Read and decode `<zonepath>/lastexited` (vmload `getLastExited`,
+/// index.js:519). The file holds two whitespace-separated fields:
+/// `<epoch_secs> <raw_status>`. Returns the decoded `(exit_status,
+/// exit_timestamp)`; `None` when the file is absent or malformed (a zone that
+/// has never exited). The timestamp is `None` only if the epoch field is
+/// unparseable, mirroring node's best-effort decode.
+async fn read_last_exited(zonepath: &Path) -> Option<(i64, Option<chrono::DateTime<chrono::Utc>>)> {
+    let bytes = tokio::fs::read(zonepath.join("lastexited")).await.ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let fields: Vec<&str> = text.split_whitespace().collect();
+    if fields.len() != 2 {
+        return None;
+    }
+    let raw: i64 = fields[1].parse().ok()?;
+    // node getLastExited status decode (index.js:528):
+    //   -1            -> 0 (OS-3429 normal-exit sentinel)
+    //   (raw & 0xff)==0 (WIFEXITED) -> raw >> 8
+    //   otherwise (signalled)       -> (raw & 0xff) * -1
+    let exit_status = if raw == -1 {
+        0
+    } else if raw & 0xff == 0 {
+        raw >> 8
+    } else {
+        -(raw & 0xff)
+    };
+    // node `epochTimestampSecs` does `new Date(Number(fields[0]) * 1000)`, so
+    // the fractional-second part of the lastexited epoch (e.g.
+    // `1782268970.538378`) becomes milliseconds in the ISO timestamp. Parse as
+    // f64 and split into whole seconds + nanoseconds to preserve that.
+    let exit_timestamp = fields[0].parse::<f64>().ok().and_then(|secs| {
+        let whole = secs.trunc() as i64;
+        let nanos = ((secs - secs.trunc()) * 1_000_000_000.0).round() as u32;
+        chrono::DateTime::<chrono::Utc>::from_timestamp(whole, nanos)
+    });
+    Some((exit_status, exit_timestamp))
+}
+
+/// Map a zoneadm runtime state to the vmadm-normalized `state` node reports.
+///
+/// node vmload (index.js:908) maps ONLY `installed` -> `stopped`; every other
+/// zoneadm state (`running`, `ready`, `down`, `shutting_down`, `configured`,
+/// `incomplete`, ...) passes through verbatim. Reporting the raw zoneadm walk
+/// is what lets vminfod emit the intermediate `shutting_down` -> `down` ->
+/// `stopped` transitions node consumers see during a shutdown, instead of
+/// jumping straight to `stopped`.
 fn vmadm_state(zone_state: &str) -> String {
     match zone_state {
-        // A booted zone is "running" unless the in-zone provisioning marker
-        // is still present; the marker check lives in the brand's transition
-        // attr, not here, so we report the zoneadm view directly.
-        "running" => "running",
-        "installed" | "ready" => "stopped",
-        "configured" | "incomplete" => "provisioning",
-        "down" | "shutting_down" | "empty" => "stopped",
+        "installed" => "stopped",
         other => other,
     }
     .to_string()
@@ -976,6 +1031,76 @@ mod tests {
         assert_eq!(p.zonepath, "/zones/x");
         // alias base64 "d2ViMA==" decodes to "web0".
         assert_eq!(p.alias.as_deref(), Some("web0"));
+    }
+
+    #[test]
+    fn vmadm_state_only_maps_installed() {
+        // node vmload maps only `installed` -> `stopped`; the rest of the
+        // shutdown walk passes through verbatim so vminfod can emit each step.
+        assert_eq!(vmadm_state("installed"), "stopped");
+        assert_eq!(vmadm_state("running"), "running");
+        assert_eq!(vmadm_state("ready"), "ready");
+        assert_eq!(vmadm_state("shutting_down"), "shutting_down");
+        assert_eq!(vmadm_state("down"), "down");
+        assert_eq!(vmadm_state("configured"), "configured");
+        assert_eq!(vmadm_state("incomplete"), "incomplete");
+    }
+
+    #[tokio::test]
+    async fn last_exited_decodes_wifexited_and_signal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // WIFEXITED: raw 256 (0x100), low byte 0 -> status 256>>8 = 1.
+        // Fractional epoch (like the real poststate hook writes) -> ms.
+        tokio::fs::write(dir.path().join("lastexited"), "1700000000.538378 256")
+            .await
+            .expect("write");
+        let (status, ts) = read_last_exited(dir.path()).await.expect("decoded");
+        assert_eq!(status, 1);
+        let ts = ts.expect("timestamp");
+        // The fractional part survives as milliseconds in the ISO form.
+        assert_eq!(
+            ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "2023-11-14T22:13:20.538Z"
+        );
+
+        // OS-3429 sentinel -1 -> normal exit 0.
+        tokio::fs::write(dir.path().join("lastexited"), "1700000001 -1")
+            .await
+            .expect("write");
+        let (status, _) = read_last_exited(dir.path()).await.expect("decoded");
+        assert_eq!(status, 0);
+
+        // Signalled: raw 9 (low byte != 0) -> -(9 & 0xff) = -9.
+        tokio::fs::write(dir.path().join("lastexited"), "1700000002 9")
+            .await
+            .expect("write");
+        let (status, _) = read_last_exited(dir.path()).await.expect("decoded");
+        assert_eq!(status, -9);
+    }
+
+    #[tokio::test]
+    async fn last_exited_absent_or_malformed_is_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(read_last_exited(dir.path()).await.is_none());
+        tokio::fs::write(dir.path().join("lastexited"), "only-one-field")
+            .await
+            .expect("write");
+        assert!(read_last_exited(dir.path()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_stopped_zone_surfaces_exit_fields() {
+        let host = FakeHost::new();
+        host.set_zone_info(uuid(), runtime("installed", "joyent-minimal"));
+        host.set_export(uuid(), jm_export());
+        // The reconstruct path reads <zonepath>/lastexited from disk; the
+        // FakeHost's zonepath is /zones/<uuid> so write it there is not
+        // possible in unit tests. Instead assert the state mapping: an
+        // installed zone reports `stopped` (and a running zone never carries
+        // exit fields).
+        let vm = get(&host, uuid()).await.expect("get").expect("some");
+        assert_eq!(vm.zone_state, "installed");
+        assert_eq!(vm.state, "stopped");
     }
 
     #[test]

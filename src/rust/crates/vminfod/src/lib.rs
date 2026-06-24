@@ -21,6 +21,7 @@ pub mod cache;
 pub mod datasets;
 pub mod diff;
 pub mod events;
+pub mod fswatcher;
 pub mod hrtime;
 pub mod loader;
 pub mod server;

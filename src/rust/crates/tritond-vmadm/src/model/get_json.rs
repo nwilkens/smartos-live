@@ -241,6 +241,19 @@ pub struct VmGetJson {
     )]
     pub boot_timestamp: Option<DateTime<Utc>>,
 
+    // ---- lastexited-derived (non-running zones only) ----
+    /// Decoded child exit status from `<zonepath>/lastexited` (vmload
+    /// `getLastExited`); set only when the zone is not running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_status: Option<i64>,
+    /// Exit time from `<zonepath>/lastexited` field[0] (epoch secs ->
+    /// ISO8601); set only when the zone is not running.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "node_iso8601::option::serialize"
+    )]
+    pub exit_timestamp: Option<DateTime<Utc>>,
+
     pub customer_metadata: JsonMap,
     pub internal_metadata: JsonMap,
     pub tags: JsonMap,
@@ -323,6 +336,8 @@ impl VmGetJson {
             pid: None,
             init_restarts: None,
             boot_timestamp: None,
+            exit_status: None,
+            exit_timestamp: None,
             customer_metadata: Map::new(),
             internal_metadata: Map::new(),
             tags: Map::new(),

@@ -61,6 +61,9 @@ impl Brand {
                 zoneinit: false,
                 write_zone_netfiles: true,
                 use_vm_autoboot: false,
+                // OS brands default tmpfs to max_physical_memory
+                // (proptable.js use_tmpfs); HVM brands never get tmpfs.
+                use_tmpfs: true,
                 default_memory_overhead_mib: 0,
             },
             Brand::Bhyve => BrandFeatures {
@@ -68,6 +71,7 @@ impl Brand {
                 zoneinit: false,
                 write_zone_netfiles: false,
                 use_vm_autoboot: false,
+                use_tmpfs: false,
                 default_memory_overhead_mib: crate::constants::BHYVE_MEM_OVERHEAD_MIB,
             },
         }
@@ -89,6 +93,9 @@ pub struct BrandFeatures {
     /// immutable header). Both supported brands keep it as a zonecfg
     /// scalar instead, so this is `false` for both.
     pub use_vm_autoboot: bool,
+    /// Brand mounts a tmpfs `/tmp`; when the payload omits `tmpfs`, node
+    /// defaults it to `max_physical_memory` (MiB). HVM brands skip this.
+    pub use_tmpfs: bool,
     /// MiB added to `ram` to derive `max_physical_memory`.
     pub default_memory_overhead_mib: u64,
 }
