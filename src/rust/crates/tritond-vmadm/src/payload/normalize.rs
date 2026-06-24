@@ -92,7 +92,7 @@ pub fn normalize(
         payload.tmpfs
     };
 
-    let nics = normalize_nics(uuid, payload.add_nics.unwrap_or_default())?;
+    let nics = normalize_nics(brand, uuid, payload.add_nics.unwrap_or_default())?;
     let mut disks = if brand.is_hvm() {
         normalize_disks(&zpool, uuid, brand, payload.add_disks.unwrap_or_default())?
     } else {
@@ -285,21 +285,31 @@ fn detect_nocloud(customer: &JsonMap, internal: &JsonMap) -> bool {
         || is_nocloud(customer, "org.smartos:cloudinit_datasource")
 }
 
-fn normalize_nics(vm_uuid: Uuid, raw: Vec<NicPayload>) -> Result<Vec<NicSpec>, VmadmError> {
+fn normalize_nics(
+    brand: Brand,
+    vm_uuid: Uuid,
+    raw: Vec<NicPayload>,
+) -> Result<Vec<NicSpec>, VmadmError> {
     let any_primary = raw.iter().any(|n| n.primary.unwrap_or(false));
     raw.into_iter()
         .enumerate()
-        .map(|(idx, n)| normalize_nic(vm_uuid, idx, n, any_primary))
+        .map(|(idx, n)| normalize_nic(brand, vm_uuid, idx, n, any_primary))
         .collect()
 }
 
 fn normalize_nic(
+    brand: Brand,
     vm_uuid: Uuid,
     idx: usize,
     n: NicPayload,
     any_primary: bool,
 ) -> Result<NicSpec, VmadmError> {
-    let interface = n.interface.unwrap_or_else(|| format!("net{idx}"));
+    // Auto-assigned interface names follow the brand's prefix (`eth` for lx,
+    // `net` otherwise; VM.js:6195/6334). An interface the payload already
+    // named is preserved verbatim.
+    let interface = n
+        .interface
+        .unwrap_or_else(|| format!("{}{idx}", brand.features().interface_prefix));
     let mac = match n.mac {
         Some(m) => canonical_mac(&m)?,
         None => generate_mac(vm_uuid, idx),
@@ -455,7 +465,11 @@ fn normalize_disks(
         .enumerate()
         .map(|(idx, d)| normalize_disk(zpool, vm_uuid, brand, idx as u32, d))
         .collect::<Result<_, _>>()?;
-    assign_pci_slots(&mut disks);
+    // node `normalizeDiskSlots` (VM.js:9857) assigns pci_slot ONLY for bhyve;
+    // kvm ignores PCI slots, so its disk devices must not carry one.
+    if brand == Brand::Bhyve {
+        assign_pci_slots(&mut disks);
+    }
     Ok(disks)
 }
 
@@ -471,7 +485,13 @@ fn nocloud_seed_disk(zpool: &str, vm_uuid: Uuid, idx: u32, brand: Brand) -> Disk
         raw_path,
         disk_idx: idx,
         model: crate::model::disk::DiskModel::Virtio,
-        media: None,
+        // kvm stamps media='disk' on every disk (VM.js:4973); bhyve keeps
+        // the seed's media implicit, matching its existing emission.
+        media: if brand == Brand::Kvm {
+            Some(crate::model::disk::DiskMedia::Disk)
+        } else {
+            None
+        },
         boot: false,
         size_mib: Some(k::NOCLOUD_DISK_SIZE_MIB),
         image_uuid: None,
@@ -541,6 +561,11 @@ fn normalize_disk(
                 "unsupported disk media {other:?}"
             )));
         }
+        // node `applyZoneDefaults` (VM.js:4973) stamps media='disk' on a
+        // disk that omits it. The engine scopes that default to kvm (the
+        // brand whose device parity FIX 3 targets) and leaves bhyve's
+        // emission unchanged.
+        None if brand == Brand::Kvm => Some(DiskMedia::Disk),
         None => None,
     };
     let zfs_filesystem = crate::model::disk::disk_dataset(zpool, vm_uuid, idx, brand);
@@ -945,6 +970,54 @@ mod tests {
         assert!(!spec.nics[1].primary);
         assert_eq!(spec.nics[0].interface, "net0");
         assert_eq!(spec.nics[1].interface, "net1");
+    }
+
+    #[test]
+    fn lx_nics_use_eth_prefix() {
+        // lx features.interface_prefix == 'eth' (proptable.js:2455), so an
+        // unnamed lx NIC is eth0/eth1, matching a node-created lx zone.
+        let spec = parse(serde_json::json!({
+            "brand": "lx",
+            "image_uuid": "4d3ed29a-c851-11e6-b5a9-639aada4a9c8",
+            "kernel_version": "4.4.0",
+            "nics": [
+                { "nic_tag": "admin", "ips": ["10.88.88.50/24"], "gateways": ["10.88.88.2"] },
+                { "nic_tag": "external", "ips": ["192.168.0.5/24"] }
+            ]
+        }));
+        assert_eq!(spec.nics[0].interface, "eth0");
+        assert_eq!(spec.nics[1].interface, "eth1");
+    }
+
+    #[test]
+    fn non_lx_brands_keep_net_prefix() {
+        for brand in ["joyent-minimal", "bhyve", "kvm"] {
+            let mut json = serde_json::json!({
+                "brand": brand,
+                "nics": [{ "nic_tag": "admin", "ips": ["10.0.0.5/24"] }]
+            });
+            if brand != "joyent-minimal" {
+                json["ram"] = serde_json::json!(512);
+            } else {
+                json["image_uuid"] =
+                    serde_json::json!("22222222-2222-2222-2222-222222222222");
+            }
+            let spec = parse(json);
+            assert_eq!(spec.nics[0].interface, "net0", "brand={brand}");
+        }
+    }
+
+    #[test]
+    fn explicit_interface_name_overrides_brand_prefix() {
+        // An lx NIC that names its interface keeps that name verbatim.
+        let spec = parse(serde_json::json!({
+            "brand": "lx",
+            "image_uuid": "4d3ed29a-c851-11e6-b5a9-639aada4a9c8",
+            "kernel_version": "4.4.0",
+            "nics": [{ "interface": "net0", "nic_tag": "admin",
+                       "ips": ["10.88.88.50/24"] }]
+        }));
+        assert_eq!(spec.nics[0].interface, "net0");
     }
 
     #[test]

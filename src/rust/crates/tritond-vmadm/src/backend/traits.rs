@@ -181,6 +181,17 @@ pub trait ZoneHost: Send + Sync {
     /// `zfs destroy -rF <dataset>`; treats "does not exist" as success.
     async fn zfs_destroy_recursive(&self, dataset: &str) -> Result<()>;
 
+    /// Every volume/snapshot dataset whose name is the flat-sibling disk
+    /// `<prefix>` itself or begins with `<prefix>` (i.e. `<prefix>0`,
+    /// `<prefix>1`, `<prefix>0@snap`). kvm makes its disks flat siblings of
+    /// the zoneroot (`zones/<uuid>-disk0`, VM.js:3174), so they are NOT
+    /// under the zoneroot subtree and survive the zoneroot recursive
+    /// destroy. delete enumerates them with this and destroys each
+    /// (node `deleteZone` -> `deleteVolume` per `vmobj.disks`, VM.js:13039).
+    /// Backed by `zfs list -H -o name -t volume,snapshot` filtered to the
+    /// prefix. An empty pool (no matches) yields an empty list, not an error.
+    async fn zfs_list_sibling_disks(&self, disk_prefix: &str) -> Result<Vec<String>>;
+
     /// `zoneadm -u <uuid> uninstall -F`; tolerant of already-uninstalled.
     async fn zoneadm_uninstall_force(&self, uuid: Uuid) -> Result<()>;
 

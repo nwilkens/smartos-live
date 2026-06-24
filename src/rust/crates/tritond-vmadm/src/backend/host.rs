@@ -711,6 +711,37 @@ impl ZoneHost for HostBackend {
         Ok(())
     }
 
+    async fn zfs_list_sibling_disks(&self, disk_prefix: &str) -> Result<Vec<String>> {
+        // List every volume and snapshot, then keep the ones named exactly
+        // `<prefix>` or starting with it (`<prefix>0`, `<prefix>0@snap`).
+        // The prefix already encodes the pool + zonename + `-disk`, so a
+        // simple starts-with cannot stray onto an unrelated zone's datasets.
+        let out = run(
+            ZFS,
+            &["list", "-H", "-o", "name", "-t", "volume,snapshot"],
+            None,
+            &[],
+            // No pool / no datasets at all is not an error for us.
+            &["no datasets available"],
+        )
+        .await?;
+        Ok(out
+            .lines()
+            .map(str::trim)
+            .filter(|name| {
+                // The dataset (or the part before `@`) must equal the prefix
+                // or be the prefix followed by an index digit, so `-disk`
+                // matches `-disk0`/`-disk0@snap` but never `-diskette`.
+                let base = name.split('@').next().unwrap_or(name);
+                base == disk_prefix
+                    || base
+                        .strip_prefix(disk_prefix)
+                        .is_some_and(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()))
+            })
+            .map(str::to_string)
+            .collect())
+    }
+
     async fn zoneadm_uninstall_force(&self, uuid: Uuid) -> Result<()> {
         run(
             ZONEADM,

@@ -434,13 +434,20 @@ mod tests {
         assert!(out.contains("set name=\"ram\"; set type=string; set value=\"512\""));
         assert!(out.contains("set name=\"vcpus\"; set type=string; set value=\"1\""));
         assert!(out.contains("set name=\"vnc-port\"; set type=string; set value=\"0\""));
-        // The disk device targets the dash-sibling raw zvol.
-        assert!(
-            out.contains(
-                "set match=/dev/zvol/rdsk/zones/00000000-0000-0000-0000-000000000002-disk0"
-            ),
-            "kvm disk device on dash-sibling:\n{out}"
-        );
+        // The disk device targets the dash-sibling raw zvol, carries
+        // media=disk (VM.js:4973 applyZoneDefaults), and — unlike bhyve —
+        // emits NO pci-slot (VM.js:9857 normalizeDiskSlots is bhyve-only).
+        let disk_block = "\
+add device
+set match=/dev/zvol/rdsk/zones/00000000-0000-0000-0000-000000000002-disk0
+add property (name=boot, value=\"true\")
+add property (name=model, value=\"virtio\")
+add property (name=media, value=\"disk\")
+add property (name=size, value=\"5120\")
+add property (name=image-uuid, value=\"6dde8b1a-0780-11e4-a57b-6b7ac24a7cd4\")
+";
+        assert!(out.contains(disk_block), "kvm disk block:\n{out}");
+        assert!(!out.contains("pci-slot"), "kvm must not emit pci-slot:\n{out}");
         // NO bhyve-only attrs.
         assert!(!out.contains("com1"), "kvm has no com1:\n{out}");
         assert!(!out.contains("com2"), "kvm has no com2:\n{out}");

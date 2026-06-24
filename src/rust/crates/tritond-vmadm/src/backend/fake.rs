@@ -363,7 +363,32 @@ impl ZoneHost for FakeHost {
     }
 
     async fn zfs_destroy_recursive(&self, dataset: &str) -> Result<()> {
-        self.record(format!("zfs destroy -rF {dataset}"))
+        self.record(format!("zfs destroy -rF {dataset}"))?;
+        // A recursive destroy clears the dataset and (for a `-rF` of a
+        // volume) any of its snapshots from the existence set, so a delete
+        // test can assert the sibling zvols and their snapshots are gone.
+        let mut ds = lock(&self.datasets);
+        ds.retain(|d| {
+            d != dataset && !d.starts_with(&format!("{dataset}@")) && !d.starts_with(&format!("{dataset}/"))
+        });
+        Ok(())
+    }
+
+    async fn zfs_list_sibling_disks(&self, disk_prefix: &str) -> Result<Vec<String>> {
+        self.record(format!("zfs list sibling-disks {disk_prefix}"))?;
+        let mut out: Vec<String> = lock(&self.datasets)
+            .iter()
+            .filter(|name| {
+                let base = name.split('@').next().unwrap_or(name);
+                base == disk_prefix
+                    || base
+                        .strip_prefix(disk_prefix)
+                        .is_some_and(|r| r.chars().next().is_some_and(|c| c.is_ascii_digit()))
+            })
+            .cloned()
+            .collect();
+        out.sort();
+        Ok(out)
     }
 
     async fn zoneadm_uninstall_force(&self, uuid: Uuid) -> Result<()> {

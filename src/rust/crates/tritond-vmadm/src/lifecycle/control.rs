@@ -99,10 +99,28 @@ pub async fn delete_in<H: ZoneHost>(host: &H, uuid: Uuid) -> Result<()> {
     }
     host.zoneadm_uninstall_force(uuid).await?;
     host.zonecfg_delete_force(uuid).await?;
-    // Residual datasets (bhyve zvols under zones/<uuid>) — tolerant of
-    // already-gone.
+    // Residual datasets — tolerant of already-gone. The zoneroot recursive
+    // destroy covers bhyve disks (children under zones/<uuid>) and the
+    // zoneroot itself. kvm disks are FLAT SIBLINGS (zones/<uuid>-diskN,
+    // VM.js:3174), outside the zoneroot subtree, so they must be enumerated
+    // and destroyed separately or they leak (node deleteZone destroys
+    // per-VM volumes, VM.js:13039).
     if !zfs_filesystem.is_empty() {
+        destroy_sibling_disks(host, &zfs_filesystem).await?;
         host.zfs_destroy_recursive(&zfs_filesystem).await?;
+    }
+    Ok(())
+}
+
+/// Destroy the flat-sibling disk zvols (`<zoneroot>-disk*`) and any of their
+/// snapshots. These live OUTSIDE the zoneroot subtree (kvm layout), so the
+/// zoneroot recursive destroy never reaches them. Each destroy is tolerant
+/// of an already-gone dataset; a brand with no sibling disks (bhyve, OS
+/// zones) simply finds none.
+async fn destroy_sibling_disks<H: ZoneHost>(host: &H, zfs_filesystem: &str) -> Result<()> {
+    let disk_prefix = format!("{zfs_filesystem}-disk");
+    for dataset in host.zfs_list_sibling_disks(&disk_prefix).await? {
+        host.zfs_destroy_recursive(&dataset).await?;
     }
     Ok(())
 }
@@ -198,6 +216,77 @@ mod tests {
             .map(|m| ops.iter().position(|o| o.contains(m)).expect(m))
             .collect();
         assert!(order.windows(2).all(|w| w[0] < w[1]), "{ops:?}");
+    }
+
+    /// A kvm delete must destroy the flat-sibling disk zvols (and their
+    /// snapshots), not just the zoneroot — otherwise the zvols leak.
+    #[tokio::test]
+    async fn delete_kvm_destroys_sibling_zvols() {
+        let host = FakeHost::new();
+        let mut info = running("kvm");
+        // The zoneroot is /zones/<uuid> -> zfs zones/<uuid>.
+        info.zonepath = format!("/zones/{}", uuid());
+        host.set_zone_info(uuid(), info);
+        let disk0 = format!("zones/{}-disk0", uuid());
+        let disk1 = format!("zones/{}-disk1", uuid());
+        let snap = format!("zones/{}-disk0@vmsnap-x", uuid());
+        // A neighbouring zone's sibling disk must NOT be touched.
+        let other = "zones/99999999-9999-9999-9999-999999999999-disk0".to_string();
+        host.set_dataset_exists(&disk0);
+        host.set_dataset_exists(&disk1);
+        host.set_dataset_exists(&snap);
+        host.set_dataset_exists(&other);
+
+        delete_in(&host, uuid()).await.unwrap();
+
+        let ops = host.ops();
+        // The siblings (and the snapshot) are each destroyed, plus the
+        // zoneroot itself.
+        assert!(
+            ops.iter().any(|o| o == &format!("zfs destroy -rF {disk0}")),
+            "disk0 destroyed: {ops:?}"
+        );
+        assert!(
+            ops.iter().any(|o| o == &format!("zfs destroy -rF {disk1}")),
+            "disk1 destroyed: {ops:?}"
+        );
+        assert!(
+            ops.iter().any(|o| o == &format!("zfs destroy -rF {snap}")),
+            "disk0 snapshot destroyed: {ops:?}"
+        );
+        assert!(
+            ops.iter()
+                .any(|o| o == &format!("zfs destroy -rF zones/{}", uuid())),
+            "zoneroot destroyed: {ops:?}"
+        );
+        // The neighbouring zone's disk is left alone.
+        assert!(
+            !ops.iter().any(|o| o.contains(&other)),
+            "must not touch another zone's disk: {ops:?}"
+        );
+        // And the fake's existence set confirms the leak is gone.
+        assert!(!host.dataset_exists(&disk0), "disk0 still exists");
+        assert!(!host.dataset_exists(&disk1), "disk1 still exists");
+        assert!(!host.dataset_exists(&snap), "snapshot still exists");
+        assert!(host.dataset_exists(&other), "neighbour disk wrongly destroyed");
+    }
+
+    /// bhyve disks are children of the zoneroot; the sibling enumeration
+    /// finds nothing and the zoneroot recursive destroy covers them.
+    #[tokio::test]
+    async fn delete_bhyve_has_no_sibling_zvols_to_destroy() {
+        let host = FakeHost::new();
+        host.set_zone_info(uuid(), running("bhyve"));
+        delete_in(&host, uuid()).await.unwrap();
+        let ops = host.ops();
+        // Only the zoneroot recursive destroy (children come with it); no
+        // extra sibling destroys beyond the zoneroot.
+        let destroys: Vec<_> = ops.iter().filter(|o| o.starts_with("zfs destroy")).collect();
+        assert_eq!(destroys.len(), 1, "exactly the zoneroot destroy: {ops:?}");
+        assert!(
+            destroys[0] == &format!("zfs destroy -rF zones/{}", uuid()),
+            "{destroys:?}"
+        );
     }
 
     #[tokio::test]

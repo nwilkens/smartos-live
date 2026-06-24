@@ -98,6 +98,7 @@ impl Brand {
                 limit_priv: &["default"],
                 // OS zones have no zvol disks; the disk-model set is unused.
                 disk_models: &[],
+                interface_prefix: "net",
             },
             Brand::Bhyve => BrandFeatures {
                 var_svc_provisioning: false,
@@ -122,6 +123,7 @@ impl Brand {
                 ],
                 // proptable.js:2383 bhyve disk_models.
                 disk_models: &["virtio", "ahci", "nvme"],
+                interface_prefix: "net",
             },
             // proptable.js:2433 brand_options.kvm.features. KVM is HVM like
             // bhyve, but: it owns the zoneroot (var_svc_provisioning=true,
@@ -159,6 +161,7 @@ impl Brand {
                 ],
                 // proptable.js:2449 kvm disk_models.
                 disk_models: &["virtio", "scsi", "ide"],
+                interface_prefix: "net",
             },
             // proptable.js:2451 brand_options.lx.features. lx mirrors
             // joyent-minimal's OS sizing/priv model; the only behavioural
@@ -190,6 +193,10 @@ impl Brand {
                 limit_priv: &["default"],
                 // OS zones have no zvol disks; the disk-model set is unused.
                 disk_models: &[],
+                // proptable.js:2455 lx.features.interface_prefix = 'eth':
+                // the lx brand presents Linux ethN names, so the zonecfg
+                // `physical` must match (eth0, not net0).
+                interface_prefix: "eth",
             },
         }
     }
@@ -231,6 +238,11 @@ pub struct BrandFeatures {
     /// bhyve [virtio,ahci,nvme], kvm [virtio,scsi,ide]. Empty for OS zones
     /// (no zvol disks). Create validates each disk model against this set.
     pub disk_models: &'static [&'static str],
+    /// Prefix for auto-assigned NIC interface names (`<prefix><idx>`):
+    /// `net` for every brand except lx, which uses `eth` so the in-guest
+    /// Linux names match (proptable.js:2455 `interface_prefix: 'eth'`;
+    /// VM.js:6195 falls back to `net` when the feature is absent).
+    pub interface_prefix: &'static str,
 }
 
 #[cfg(test)]
@@ -321,5 +333,15 @@ mod tests {
         // kvm disk models differ from bhyve.
         assert_eq!(f.disk_models, &["virtio", "scsi", "ide"]);
         assert_eq!(Brand::Bhyve.features().disk_models, &["virtio", "ahci", "nvme"]);
+    }
+
+    #[test]
+    fn interface_prefix_is_eth_only_for_lx() {
+        // proptable.js:2455 lx features.interface_prefix == 'eth'; every
+        // other brand falls back to 'net' (VM.js:6195).
+        assert_eq!(Brand::Lx.features().interface_prefix, "eth");
+        assert_eq!(Brand::JoyentMinimal.features().interface_prefix, "net");
+        assert_eq!(Brand::Bhyve.features().interface_prefix, "net");
+        assert_eq!(Brand::Kvm.features().interface_prefix, "net");
     }
 }
