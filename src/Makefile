@@ -381,11 +381,26 @@ check : TARGET = check
 
 all: $(TARGETS) $(USR_LIB_TARGETS) $(SMARTDC_TARGETS) \
     $(SMARTDC_LIB_TARGETS) $(LIBSDC_TARGETS) $(ETC_TARGETS) \
-    $(SUBDIRS) $(BHYVE_TARGETS) $(ETC_COPYRIGHT_TARGET)
+    $(SUBDIRS) $(BHYVE_TARGETS) $(ETC_COPYRIGHT_TARGET) rust
 
 
 $(SUBDIRS): FRC
 	@cd $@; pwd; $(MAKE) $(TARGET)
+
+#
+# Native Rust PI tools. `gmake -C rust all` drives cargo (offline, against
+# the committed vendor/ tree); the install target copies the resulting
+# binaries out of $(RUST_RELEASE_DIR).
+#
+.PHONY: rust rust_check rust_clean
+rust: FRC
+	$(MAKE) -C rust all
+
+rust_check: FRC
+	$(MAKE) -C rust check
+
+rust_clean: FRC
+	$(MAKE) -C rust clean
 
 install: all $(SUBDIRS)
 	echo "7.0" >$(DESTDIR)/.smartdc_version
@@ -393,6 +408,12 @@ install: all $(SUBDIRS)
 	mkdir -p $(DESTDIR)/var/log/sdc/upload $(DESTDIR)/var/log/vm
 	mkdir -p $(DESTDIR)/usr/bin
 	cp -p $(USRBIN_TARGETS) $(DESTDIR)/usr/bin
+	# Rust replaces the Node json/disklayout/mkzpool tools in /usr/bin.
+	# (sysinfo stays a shell script; it calls the now-Rust /usr/bin/json.)
+	for tool in json disklayout mkzpool; do \
+		cp $(RUST_RELEASE_DIR)/$$tool $(DESTDIR)/usr/bin/$$tool; \
+		chmod 0555 $(DESTDIR)/usr/bin/$$tool; \
+	done
 	mkdir -p $(DESTDIR)/usr/sbin
 	cp -p fssstat piadm sysevent zonememstat zonemon $(DESTDIR)/usr/sbin
 	cp -p $(USR_LIB_TARGETS) $(DESTDIR)/usr/lib
@@ -402,6 +423,9 @@ install: all $(SUBDIRS)
 	cp -p $(LIBSDC_TARGETS) $(DESTDIR)/lib/sdc/
 	mkdir -p $(DESTDIR)/smartdc/lib
 	cp -p $(SMARTDC_LIB_TARGETS) $(DESTDIR)/smartdc/lib
+	# Rust replaces the Node ntp_config tool.
+	cp $(RUST_RELEASE_DIR)/ntp_config $(DESTDIR)/smartdc/lib/ntp_config
+	chmod 0555 $(DESTDIR)/smartdc/lib/ntp_config
 	mkdir -p $(DESTDIR)/etc/ssh $(DESTDIR)/etc/notices $(DESTDIR)/etc/dhcp
 	for file in $(ETC_TARGETS); do \
 		cp -r $$file $(DESTDIR)/$$file; \
@@ -449,11 +473,13 @@ install: all $(SUBDIRS)
 	cp fswatcher $(DESTDIR)/usr/vm/sbin/fswatcher
 	cp dockerinit/build/dockerinit $(DESTDIR)/usr/vm/sbin/dockerinit
 	cp dockerinit/build/dockerexec $(DESTDIR)/usr/vm/sbin/dockerexec
-	cp zoneevent.js $(DESTDIR)/usr/vm/sbin/zoneevent
+	cp $(RUST_RELEASE_DIR)/zoneevent $(DESTDIR)/usr/vm/sbin/zoneevent
+	chmod 0555 $(DESTDIR)/usr/vm/sbin/zoneevent
 	cp zfs_send $(DESTDIR)/usr/vm/sbin/zfs_send
 	cp zfs_recv $(DESTDIR)/usr/vm/sbin/zfs_recv
 	cp vmunbundle $(DESTDIR)/usr/vm/sbin/vmunbundle
-	cp filewait.js $(DESTDIR)/usr/vm/sbin/filewait
+	cp $(RUST_RELEASE_DIR)/filewait $(DESTDIR)/usr/vm/sbin/filewait
+	chmod 0555 $(DESTDIR)/usr/vm/sbin/filewait
 	mkdir -p $(DESTDIR)/lib/svc/manifest/system
 	cp vm/smf/system-vmadmd.xml \
 	    $(DESTDIR)/lib/svc/manifest/system/system-vmadmd.xml
@@ -461,22 +487,27 @@ install: all $(SUBDIRS)
 	    $(DESTDIR)/lib/svc/manifest/system/system-metadata.xml
 	cp vm/smf/system-vminfod.xml \
 	    $(DESTDIR)/lib/svc/manifest/system/system-vminfod.xml
-	mv $(DESTDIR)/usr/vm/sbin/vmadmd.js $(DESTDIR)/usr/vm/sbin/vmadmd
-	mv $(DESTDIR)/usr/vm/sbin/vmadm.js $(DESTDIR)/usr/vm/sbin/vmadm
-	mv $(DESTDIR)/usr/vm/sbin/vminfo.js $(DESTDIR)/usr/vm/sbin/vminfo
-	mv $(DESTDIR)/usr/vm/sbin/vminfod.js $(DESTDIR)/usr/vm/sbin/vminfod
-	mv $(DESTDIR)/usr/vm/sbin/add-userscript.js \
-	    $(DESTDIR)/usr/vm/sbin/add-userscript
-	mv $(DESTDIR)/usr/vm/sbin/metadata.js $(DESTDIR)/usr/vm/sbin/metadata
+	# Rust replaces the Node vm/sbin tools. The staged .js files (from
+	# "cp -PR vm" above) are removed so the PI keeps only the binaries the
+	# manifest lists. (Node staging itself is removed in the next phase.)
+	rm -f $(DESTDIR)/usr/vm/sbin/vmadmd.js $(DESTDIR)/usr/vm/sbin/vmadm.js \
+	    $(DESTDIR)/usr/vm/sbin/vminfo.js $(DESTDIR)/usr/vm/sbin/vminfod.js \
+	    $(DESTDIR)/usr/vm/sbin/add-userscript.js \
+	    $(DESTDIR)/usr/vm/sbin/metadata.js
+	for tool in vmadm vmadmd vminfo vminfod metadata add-userscript; do \
+		cp $(RUST_RELEASE_DIR)/$$tool $(DESTDIR)/usr/vm/sbin/$$tool; \
+		chmod 0555 $(DESTDIR)/usr/vm/sbin/$$tool; \
+	done
+	# Node bunyan library stays for node modules that require('bunyan');
+	# only the /usr/bin/bunyan tool becomes the Rust binary.
 	sed -e "s|require('dtrace-provider'|require('/usr/node/node_modules/dtrace-provider'|" \
 	    < node-bunyan/lib/bunyan.js \
 	    > $(NODE_DESTDIR)/bunyan.js
 	mkdir -p $(DESTDIR)/usr/share/man/man1
 	cp node-bunyan/docs/bunyan.1 $(DESTDIR)/usr/share/man/man1/bunyan.1
 	mkdir -p $(DESTDIR)/usr/bin
-	sed -e 's|^#!/usr/bin/env node.*$$|#!/usr/node/bin/node|' \
-	    < node-bunyan/bin/bunyan \
-	    > $(DESTDIR)/usr/bin/bunyan
+	cp $(RUST_RELEASE_DIR)/bunyan $(DESTDIR)/usr/bin/bunyan
+	chmod 0555 $(DESTDIR)/usr/bin/bunyan
 	rm -rf $(DESTDIR)/usr/img
 	mkdir -m 0755 -p $(DESTDIR)/usr/img
 	cp img/README.md $(DESTDIR)/usr/img/README.md
@@ -486,6 +517,8 @@ install: all $(SUBDIRS)
 	cp -PR img/node_modules $(DESTDIR)/usr/img/
 	cp -PR img/sbin $(DESTDIR)/usr/img/
 	cp -PR img/test $(DESTDIR)/usr/img/
+	cp $(RUST_RELEASE_DIR)/imgadm $(DESTDIR)/usr/img/sbin/imgadm
+	chmod 0555 $(DESTDIR)/usr/img/sbin/imgadm
 	rm -rf $(DESTDIR)/usr/fw
 	mkdir -m 0755 -p $(DESTDIR)/usr/fw/test
 	cp -PR fw/etc $(DESTDIR)/usr/fw/
@@ -497,6 +530,8 @@ install: all $(SUBDIRS)
 	cp -PR fw/lib $(DESTDIR)/usr/fw/
 	cp -PR fw/node_modules $(DESTDIR)/usr/fw/
 	cp -PR fw/sbin $(DESTDIR)/usr/fw/
+	cp $(RUST_RELEASE_DIR)/fwadm $(DESTDIR)/usr/fw/sbin/fwadm
+	chmod 0555 $(DESTDIR)/usr/fw/sbin/fwadm
 	cp -Pr node_modules/onlyif.js $(DESTDIR)/usr/fw/node_modules/onlyif.js
 	cp $(DESTDIR)/usr/node/0.10/node_modules/dtrace-provider.js $(DESTDIR)/usr/fw/node_modules/dtrace-provider.js
 	cp $(DTRACE_PROVIDER_SRCDIR)/src/build/Release/DTraceProviderBindings.node \
@@ -550,6 +585,7 @@ check: $(JSLINT) $(SUBDIRS)
 	done)
 	@$(MAKE) -C fw check
 	@printf "\nJS style ok!\n"
+	@$(MAKE) rust_check
 
 .PHONY: manifest
 manifest:
@@ -573,7 +609,7 @@ manifest:
 $(JSLINT):
 	(cd $(ROOT); $(MAKE) jsl)
 
-clean: $(SUBDIRS)
+clean: $(SUBDIRS) rust_clean
 	-rm -f $(CLEANFILES) *.o
 
 include Makefile.targ

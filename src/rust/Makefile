@@ -12,9 +12,10 @@ CARGO ?=		cargo
 CARGO_TARGET ?=		x86_64-unknown-illumos
 RUST_RELEASE_DIR =	target/$(CARGO_TARGET)/release
 
-# Hermetic once vendor/ is populated (added with the first dependency in
-# Phase 1). --locked is enabled here; commit Cargo.lock with every change.
-CARGO_BUILD_FLAGS =	--release --target $(CARGO_TARGET) --locked
+# Hermetic build: vendor/ is committed and .cargo/config.toml redirects
+# crates.io to it. --offline forbids any network access; --locked pins
+# Cargo.lock (commit it with every dependency change).
+CARGO_BUILD_FLAGS =	--release --target $(CARGO_TARGET) --offline --locked
 
 .PHONY: all check test clean
 

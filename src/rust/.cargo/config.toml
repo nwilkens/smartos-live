@@ -1,0 +1,12 @@
+# Hermetic build configuration for the SmartOS platform image.
+# vendor/ is committed so `cargo build --offline --locked` needs no network.
+# Generated with `cargo vendor vendor`; refresh both together.
+
+[build]
+target = "x86_64-unknown-illumos"
+
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

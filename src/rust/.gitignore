@@ -1,1 +1,3 @@
+# Build output only. vendor/ is intentionally committed for a hermetic,
+# network-independent platform build (`cargo build --offline --locked`).
 /target

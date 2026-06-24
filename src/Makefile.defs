@@ -66,6 +66,15 @@ PREFIX_NODE =	$(DESTDIR)/usr/node/0.10
 NODE_EXEC =	$(NATIVEDIR)/usr/node/0.10/bin/node
 NPM_EXEC =	$(NATIVEDIR)/usr/node/0.10/bin/npm
 
+#
+# Rust toolchain for the native PI tools under src/rust. The build host
+# provides cargo; the workspace vendors its crates so the build is offline.
+# RUST_RELEASE_DIR is where the install step picks up the compiled binaries.
+#
+CARGO ?=	cargo
+CARGO_TARGET =	x86_64-unknown-illumos
+RUST_RELEASE_DIR =	$(BASE)/rust/target/$(CARGO_TARGET)/release
+
 DEBUG_FLAGS =	-g
 WARN_FLAGS =	-Wall -Wextra -Werror
 PIC_FLAGS =	-fPIC
