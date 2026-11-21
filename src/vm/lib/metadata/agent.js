@@ -21,6 +21,7 @@
  * CDDL HEADER END
  *
  * Copyright 2019 Joyent, Inc.
+ * Copyright 2026 Edgecast Cloud LLC.
  *
  *
  * # OVERVIEW
@@ -301,7 +302,7 @@ function createServersOnExistingZones(vms, callback) {
             return;
         }
 
-        if (vm.brand === 'kvm' || vm.brand === 'bhyve') {
+        if (VM.isHvmBrand(vm.brand)) {
             // For KVM, the zone must be running otherwise Qemu will not
             // have created a socket.
             if (vm.zone_state !== 'running') {
@@ -394,7 +395,7 @@ function handleZoneCreated(vm) {
         self.createZoneLog(vm.brand, vm.zonename);
     }
 
-    if (vm.brand === 'kvm' || vm.brand === 'bhyve') {
+    if (VM.isHvmBrand(vm.brand)) {
         self.startKVMSocketServer(vm.zonename, noop);
     } else {
         self.startZoneSocketServer(vm.zonename, noop);
@@ -475,7 +476,7 @@ MetadataAgent.prototype.start = function start() {
          * Guest reboots can be detected by 'init_restarts' incrementing, which
          * is seen when "action" is "changed" - not "added".
          */
-        if (ev.vm.brand !== 'kvm' && ev.vm.brand !== 'bhyve') {
+        if (!VM.isHvmBrand(ev.vm.brand)) {
             return;
         }
 

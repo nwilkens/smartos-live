@@ -22,6 +22,7 @@
  * CDDL HEADER END
  *
  * Copyright 2019 Joyent, Inc.
+ * Copyright 2026 Edgecast Cloud LLC.
  *
  */
 
@@ -496,7 +497,7 @@ function handleProvisioning(vmobj, cb)
             'zonepath'
         ];
 
-        if (['bhyve', 'kvm'].indexOf(vmobj.brand) !== -1) {
+        if (VM.isHvmBrand(vmobj.brand)) {
             // reload the VM to see if we should setup VNC, etc.
             VM.load(vmobj.uuid, {fields: load_fields},
                 function (load_err, obj) {
@@ -1124,10 +1125,10 @@ function updateZoneStatus(ev)
         }
 
         // don't handle transitions other than provisioning for non-kvm/bhyve
-        if (['bhyve', 'kvm'].indexOf(vmobj.brand) === -1) {
+        if (!VM.isHvmBrand(vmobj.brand)) {
             log.trace('doing nothing for ' + ev.zonename + ' transition '
                 + 'because brand "' + vmobj.brand
-                + '" is not "kvm" or "bhyve"');
+                + '" is not "kvm", "bhyve" or "rshyve"');
             return;
         }
 
@@ -1583,6 +1584,8 @@ function infoVM(uuid, types, callback)
         callback(null, res);
     };
 
+    loadCbs.rshyve = loadCbs.bhyve;
+
     function infoVNC() {
         res.vnc = {};
         if (VNC.hasOwnProperty(uuid)) {
@@ -1898,7 +1901,7 @@ function upgradeVM(vmobj, fields, callback)
     var upgrade_payload = {};
 
     // 'bhyve' didn't exist pre version 1, so VMs won't need upgrade.
-    if (vmobj.v === 1 || vmobj.brand === 'bhyve') {
+    if (vmobj.v === 1 || VM.isBhyveBrand(vmobj.brand)) {
         log.trace('VM ' + vmobj.uuid + ' already at version 1, skipping '
             + 'upgrade.');
         callback(null, vmobj);
@@ -2506,8 +2509,7 @@ function main()
                                     + result);
                                 upg_cb();
                             });
-                        } else if (['bhyve', 'kvm'].
-                                indexOf(vmobj.brand) !== -1) {
+                        } else if (VM.isHvmBrand(vmobj.brand)) {
                             log.debug('calling loadVM(' + vmobj.uuid + ')');
                             loadVM(vmobj, do_autoboot);
                             upg_cb();

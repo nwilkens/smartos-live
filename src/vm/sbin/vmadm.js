@@ -22,6 +22,7 @@
  * CDDL HEADER END
  *
  * Copyright (c) 2019, Joyent, Inc.
+ * Copyright 2026 Edgecast Cloud LLC.
  *
  */
 
@@ -496,7 +497,7 @@ function addFakeFields(m)
         m.type = 'OS';
     }
 
-    if (m.brand !== 'kvm' && m.brand !== 'bhyve') {
+    if (!VM.isHvmBrand(m.brand)) {
         // when we do not normally have 'ram', set as fake property for
         // consistency
         m.ram = m.max_physical_memory;
