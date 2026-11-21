@@ -562,9 +562,10 @@ tab-complete UUIDs rather than having to type them out for every command.
 
         vmtype -- This value can be one of the following groups:
                   - OS:  all types of OS VMs (joyent, joyent-minimal, builder, and lx)
-                  - HVM: all types of HVM VMs (bhyve and kvm)
+                  - HVM: all types of HVM VMs (bhyve, kvm, and rshyve)
                   - ANY: all types of VMs
-                  or an explicit brand name such as 'lx'.
+                  or an explicit brand name such as 'lx'. A property marked
+                  'bhyve' also applies to rshyve VMs unless it says otherwise.
 
         listable -- if they can be included in the -o or -s lists for the
                     'vmadm list' command.
@@ -693,14 +694,32 @@ tab-complete UUIDs rather than having to type them out for every command.
     brand:
 
         This will be one of 'joyent', 'joyent-minimal', 'builder', or 'lx' for OS
-        virtualization, or 'kvm' or 'bhyve' for full hardware virtualization.
-        This is a required value for VM creation.
+        virtualization, or 'kvm', 'bhyve', or 'rshyve' for full hardware
+        virtualization. This is a required value for VM creation.
 
-        type: string (joyent|joyent-minimal|builder|lx|kvm|bhyve)
+        The 'rshyve' brand runs the guests of the 'bhyve' brand with the rshyve
+        hypervisor, and what is said here about bhyve VMs is also true for
+        rshyve VMs. An rshyve VM cannot have a top-level image_uuid.
+
+        type: string (joyent|joyent-minimal|builder|lx|kvm|bhyve|rshyve)
         vmtype: ANY
         listable: yes
         create: yes
         update: no
+
+    cpu_baseline:
+
+        The set of CPU features that rshyve shows to the guest. With 'host' the
+        guest sees every feature of the host CPU. With 'avx2' it does not see
+        AVX-512, and with 'sse42' it sees neither AVX-512 nor AVX2. A lower
+        setting lets a guest run on hosts with different CPUs.
+
+        type: string (host|avx2|sse42)
+        vmtype: rshyve
+        listable: no
+        create: yes
+        update: yes (requires VM reboot to take effect)
+        default: 'host'
 
     cpu_cap:
 
@@ -1058,6 +1077,8 @@ tab-complete UUIDs rather than having to type them out for every command.
 
         type: string (kvm: ['virtio','ide','scsi'])
                      (bhyve: ['virtio','ahci','nvme'])
+                     (rshyve: ['virtio','nvme'], and 'ahci' when media
+                     is 'cdrom')
         vmtype: HVM
         listable: yes (see above)
         create: yes
@@ -1271,6 +1292,18 @@ tab-complete UUIDs rather than having to type them out for every command.
         listable: yes
         create: no
         update: no
+
+    hyperv:
+
+        Enables the Microsoft Hyper-V enlightenments, which Windows guests need
+        to run well. Other guests do not use them.
+
+        type: boolean
+        vmtype: rshyve
+        listable: no
+        create: yes
+        update: yes (requires VM reboot to take effect)
+        default: false
 
     image_uuid:
 
@@ -1920,6 +1953,18 @@ tab-complete UUIDs rather than having to type them out for every command.
         update: yes (requires VM reboot to take effect)
         default: 256
 
+    reservoir:
+
+        When true, the memory of the guest comes from the VMM reservoir of the
+        host.
+
+        type: boolean
+        vmtype: rshyve
+        listable: no
+        create: yes
+        update: yes (requires VM reboot to take effect)
+        default: false
+
     resolvers:
 
         For OS VMs, this value sets the resolvers which get put into
@@ -1961,6 +2006,21 @@ tab-complete UUIDs rather than having to type them out for every command.
         listable: no
         create: yes
         update: yes
+
+    rshyve_path:
+
+        The rshyve program that this VM runs in place of /usr/sbin/rshyve, as
+        an absolute path inside the zone. The file must be on a file system
+        that the zone has read-only, such as a global zone directory added to
+        the zone with zonecfg(8) 'add fs' and the 'ro' option. vmadm does not
+        add that file system. The VM does not boot if the path cannot be used.
+
+        type: string (absolute path)
+        vmtype: rshyve
+        listable: no
+        create: yes
+        update: yes (requires VM reboot to take effect)
+        default: <unset>
 
     snapshots (EXPERIMENTAL):
 
@@ -2083,7 +2143,7 @@ tab-complete UUIDs rather than having to type them out for every command.
 
         This is a virtual field and cannot be updated. It will be 'OS' when the
         brand == 'joyent*', 'LX' when the brand == 'lx', 'KVM' when the
-        brand == 'kvm', and 'BHYVE' when the brand == 'bhyve'.
+        brand == 'kvm', and 'BHYVE' when the brand == 'bhyve' or 'rshyve'.
 
         type: string value, one of: ['OS', 'LX', 'KVM', 'BHYVE']
         vmtype: ANY
@@ -2137,6 +2197,7 @@ tab-complete UUIDs rather than having to type them out for every command.
 	devices due to guest driver bugs, so if this property is missing from
 	an existing VM object it will be false. Newly created VMs will set
 	this to true, unless the creation payload specifies it to be false.
+	The rshyve brand does not have this property.
 
 	type: boolean
 	vmtype: bhyve
@@ -2200,6 +2261,18 @@ tab-complete UUIDs rather than having to type them out for every command.
         create: yes
         update: yes
         default: 0
+
+    vtpm:
+
+        Gives the guest a TPM 2.0 device. The state of the TPM is kept in the
+        zone root dataset of the VM.
+
+        type: boolean
+        vmtype: rshyve
+        listable: no
+        create: yes
+        update: yes (requires VM reboot to take effect)
+        default: false
 
     zfs_data_compression:
 
