@@ -1,0 +1,76 @@
+{
+  "zonename": "6488e971-2bd4-46b4-8868-224b19379b45",
+  "autoboot": false,
+  "brand": "rshyve",
+  "limit_priv": "default,-file_link_any,-net_access,-proc_fork,-proc_info,-proc_session",
+  "v": 1,
+  "create_timestamp": "2026-11-20T15:54:24.802Z",
+  "cpu_shares": 100,
+  "max_lwps": 2000,
+  "zfs_io_priority": 100,
+  "max_physical_memory": 3328,
+  "max_locked_memory": 3328,
+  "max_swap": 3328,
+  "billing_id": "00000000-0000-0000-0000-000000000000",
+  "owner_uuid": "00000000-0000-0000-0000-000000000000",
+  "ram": 2048,
+  "vcpus": 2,
+  "com1": "/dev/zconsole",
+  "com2": "socket,/tmp/vm.ttyb",
+  "bootrom": "uefi",
+  "bhyve_extra_opts": "-o migrate.export=true",
+  "zlog_mode": "g--",
+  "zlog_name": "platform.log",
+  "hyperv": true,
+  "vtpm": true,
+  "cpu_baseline": "avx2",
+  "reservoir": false,
+  "rshyve_path": "/opt/rshyve/bin/rshyve",
+  "device": null,
+  "disks": [
+    {
+      "path": "/dev/zvol/rdsk/zones/6488e971-2bd4-46b4-8868-224b19379b45/disk0",
+      "boot": true,
+      "model": "virtio",
+      "media": "disk",
+      "image_size": 10240,
+      "image_uuid": "cf6b54f9-2952-4213-ba84-b6f64a7ec229",
+      "pci_slot": "0:4:0",
+      "uuid": "11adf075-d948-6518-eaa7-fab9fcadb934"
+    },
+    {
+      "path": "/dev/zvol/rdsk/zones/6488e971-2bd4-46b4-8868-224b19379b45/disk1",
+      "boot": false,
+      "model": "nvme",
+      "media": "disk",
+      "pci_slot": "0:4:1",
+      "uuid": "4869641c-555b-6809-bd97-b9fc2a84e1b9"
+    },
+    {
+      "path": "/dev/zvol/rdsk/zones/6488e971-2bd4-46b4-8868-224b19379b45/disk2",
+      "boot": false,
+      "model": "ahci",
+      "media": "cdrom",
+      "pci_slot": "0:3:0",
+      "uuid": "7a3d2f0e-1b5c-4e8a-9c6d-2f1e0a9b8c7d"
+    }
+  ],
+  "nics": [
+    {
+      "interface": "net0",
+      "mac": "b2:f6:32:07:6c:3b",
+      "nic_tag": "admin",
+      "gateway": "10.88.88.2",
+      "gateways": [
+        "10.88.88.2"
+      ],
+      "netmask": "255.255.255.0",
+      "ip": "10.88.88.221",
+      "ips": [
+        "10.88.88.221/24"
+      ],
+      "model": "virtio",
+      "primary": true
+    }
+  ]
+}

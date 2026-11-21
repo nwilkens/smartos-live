@@ -867,3 +867,154 @@ test('add disk to KVM VM with non-existent image_uuid', function (t) {
         t.end();
     });
 });
+
+// Now test some rshyve payloads
+
+var rshyve_props = {
+    cpu_baseline: 'avx2',
+    hyperv: true,
+    reservoir: true,
+    rshyve_path: '/opt/rshyve/bin/rshyve',
+    vtpm: true
+};
+
+test('rshyve create payload with the rshyve properties', function (t) {
+    var payload = {
+        brand: 'rshyve',
+        vcpus: 1,
+        ram: 256,
+        bootrom: 'uefi',
+        bhyve_extra_opts: '-o migrate.export=true',
+        disks: [
+            {boot: true, model: 'virtio', size: 5120},
+            {model: 'nvme', size: 5120}
+        ]
+    };
+
+    Object.keys(rshyve_props).forEach(function (prop) {
+        payload[prop] = rshyve_props[prop];
+    });
+
+    VM.validate('rshyve', 'create', payload, function (errors) {
+        t.ok(!errors, 'creating rshyve: ' + JSON.stringify(errors));
+        t.end();
+    });
+});
+
+test('rshyve update payload with the rshyve properties', function (t) {
+    VM.validate('rshyve', 'update', rshyve_props, function (errors) {
+        t.ok(!errors, 'updating rshyve: ' + JSON.stringify(errors));
+        t.end();
+    });
+});
+
+test('rshyve update payload that unsets properties', function (t) {
+    var payload = {cpu_baseline: '', hyperv: false, rshyve_path: ''};
+
+    VM.validate('rshyve', 'update', payload, function (errors) {
+        t.ok(!errors, 'updating rshyve: ' + JSON.stringify(errors));
+        t.end();
+    });
+});
+
+['bhyve', 'kvm', 'joyent'].forEach(function (other) {
+    test('rshyve properties are invalid for ' + other, function (t) {
+        VM.validate(other, 'update', rshyve_props, function (errors) {
+            t.ok(errors, 'invalid payload');
+            if (errors) {
+                t.deepEqual(errors.bad_properties.sort(),
+                    Object.keys(rshyve_props).sort(),
+                    'every rshyve property is a bad property');
+            }
+            t.end();
+        });
+    });
+});
+
+test('rshyve does not take virtio1 or a zone root image', function (t) {
+    var payload = {
+        brand: 'rshyve',
+        image_uuid: smartos_image_uuid,
+        virtio1: true
+    };
+
+    VM.validate('rshyve', 'create', payload, function (errors) {
+        t.ok(errors, 'invalid payload');
+        if (errors) {
+            t.deepEqual(errors.bad_properties.sort(), ['image_uuid', 'virtio1'],
+                'bad properties: ' + JSON.stringify(errors));
+        }
+        t.end();
+    });
+});
+
+[
+    'no-avx512',
+    'HOST',
+    'host ',
+    'host\n',
+    'host"; end; set limitpriv="all',
+    42,
+    ['host']
+].forEach(function (value) {
+    test('rshyve bad cpu_baseline ' + JSON.stringify(value), function (t) {
+        VM.validate('rshyve', 'update', {cpu_baseline: value},
+            function (errors) {
+
+            t.ok(errors, 'invalid payload');
+            if (errors) {
+                t.deepEqual(errors.bad_values, ['cpu_baseline'],
+                    'bad values: ' + JSON.stringify(errors));
+            }
+            t.end();
+        });
+    });
+});
+
+[
+    'opt/rshyve',
+    '/',
+    '/opt/',
+    '/opt//rshyve',
+    '/opt/../rshyve',
+    '/opt/./rshyve',
+    '/opt/my rshyve',
+    '/opt/rshyve\n',
+    '/opt/rshyve"; end; add fs; set dir="/x',
+    '/opt/rshyve;halt',
+    '/opt/rshyve\\',
+    '/' + new Array(257).join('a'),
+    42,
+    ['/opt/rshyve']
+].forEach(function (value) {
+    var name = JSON.stringify(value).substr(0, 40);
+
+    test('rshyve bad rshyve_path ' + name, function (t) {
+        VM.validate('rshyve', 'update', {rshyve_path: value},
+            function (errors) {
+
+            t.ok(errors, 'invalid payload');
+            if (errors) {
+                t.deepEqual(errors.bad_values, ['rshyve_path'],
+                    'bad values: ' + JSON.stringify(errors));
+            }
+            t.end();
+        });
+    });
+});
+
+['hyperv', 'reservoir', 'vtpm'].forEach(function (prop) {
+    test('rshyve non-boolean ' + prop, function (t) {
+        var payload = {};
+
+        payload[prop] = 'true"; end';
+        VM.validate('rshyve', 'update', payload, function (errors) {
+            t.ok(errors, 'invalid payload');
+            if (errors) {
+                t.deepEqual(errors.bad_values, [prop],
+                    'bad values: ' + JSON.stringify(errors));
+            }
+            t.end();
+        });
+    });
+});
