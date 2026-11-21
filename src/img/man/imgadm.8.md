@@ -350,7 +350,8 @@ supplied channel.
 
         Note: When creating an image from a VM with brand 'bhyve', 'lx', or
         'kvm', the resulting manifest will have requirements.brand set to match
-        the brand of the source VM. If this is undesirable, the
+        the brand of the source VM. For a VM with brand 'rshyve' it is set to
+        'bhyve'. If this is undesirable, the
         requirements.brand can be set (optionally empty if the resulting image
         should not have this value set) in the manifest passed with the '-m'
         option.

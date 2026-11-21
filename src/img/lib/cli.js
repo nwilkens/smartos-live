@@ -22,6 +22,7 @@
  *
  * Copyright 2020 Joyent, Inc.
  * Copyright 2022 MNX Cloud, Inc.
+ * Copyright 2026 Edgecast Cloud LLC.
  *
  * * *
  *
@@ -1925,7 +1926,8 @@ CLI.prototype.do_create.help = (
     + '\n'
     + 'Note: When creating an image from a VM with brand \'bhyve\', \'lx\', or\n'
     + '\'kvm\', the resulting manifest will have requirements.brand set to match\n'
-    + 'the brand of the source VM. If this is undesirable, the\n'
+    + 'the brand of the source VM. For a VM with brand \'rshyve\' it is set to\n'
+    + '\'bhyve\'. If this is undesirable, the\n'
     + 'requirements.brand can be set (optionally empty if the resulting image\n'
     + 'should not have this value set) in the manifest passed with the \'-m\'\n'
     + 'option.\n'

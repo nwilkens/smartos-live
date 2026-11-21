@@ -21,6 +21,7 @@
  * CDDL HEADER END
  *
  * Copyright 2020 Joyent, Inc.
+ * Copyright 2026 Edgecast Cloud LLC.
  *
  * * *
  * The main imgadm functionality. The CLI is a light wrapper around this tool.
@@ -86,6 +87,9 @@ var upgrade = require('./upgrade');
 var CONFIG_PATH = DB_DIR + '/imgadm.conf';
 var DEFAULT_CONFIG = {};
 var SET_REQUIREMENTS_BRAND_BRANDS = ['bhyve', 'lx', 'kvm'];
+var HVM_BRANDS = ['bhyve', 'kvm', 'rshyve'];
+// Brands that keep the disks of a VM under its zone dataset.
+var BHYVE_BRANDS = ['bhyve', 'rshyve'];
 
 /* BEGIN JSSTYLED */
 /**
@@ -93,7 +97,7 @@ var SET_REQUIREMENTS_BRAND_BRANDS = ['bhyve', 'lx', 'kvm'];
  * cloned to:
  *  1. /zones/<uuid>        (smartos, lx and docker)
  *  2. /zones/<uuid>-diskN  (kvm)
- *  3. /zones/<uuid>/diskN  (bhyve)
+ *  3. /zones/<uuid>/diskN  (bhyve and rshyve)
  */
 var VMADM_FS_NAME_RE = /^([a-zA-Z][a-zA-Z\._-]*)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})([-/]disk\d+)?$/;
 
@@ -3364,7 +3368,7 @@ IMGADM.prototype.createImage = function createImage(options, callback) {
         },
         function getVmInfo(next) {
             var opts;
-            if (vmInfo.brand === 'kvm' || vmInfo.brand === 'bhyve') {
+            if (HVM_BRANDS.indexOf(vmInfo.brand) !== -1) {
                 if (vmInfo.disks && vmInfo.disks[0]) {
                     var disk = vmInfo.disks[0];
                     vmZfsFilesystemName = disk.zfs_filesystem;
@@ -3447,7 +3451,7 @@ IMGADM.prototype.createImage = function createImage(options, callback) {
             );
         },
         function getSystemInfo(next) {
-            if (vmInfo.brand === 'kvm' || vmInfo.brand === 'bhyve') {
+            if (HVM_BRANDS.indexOf(vmInfo.brand) !== -1) {
                 next();
                 return;
             }
@@ -3503,7 +3507,11 @@ IMGADM.prototype.createImage = function createImage(options, callback) {
                 log.debug({min_platform: m.requirements.min_platform},
                     'set smartos image min_platform to current');
             }
-            if (SET_REQUIREMENTS_BRAND_BRANDS.indexOf(vmInfo.brand) !== -1
+            // The rshyve brand runs bhyve images, and an image of one of its
+            // VMs is a bhyve image.
+            var imageBrand = (vmInfo.brand === 'rshyve') ? 'bhyve'
+                : vmInfo.brand;
+            if (SET_REQUIREMENTS_BRAND_BRANDS.indexOf(imageBrand) !== -1
                 && !(options.manifest.requirements
                     && options.manifest.requirements.hasOwnProperty('brand')))
             {
@@ -3513,11 +3521,11 @@ IMGADM.prototype.createImage = function createImage(options, callback) {
                 // and we can't guarantee it's compatible with other brands.
                 if (!m.requirements)
                     m.requirements = {};
-                m.requirements.brand = vmInfo.brand;
+                m.requirements.brand = imageBrand;
                 log.debug({brand: m.requirements.brand},
                     'set image requirements.brand to source VM brand');
             }
-            if (vmInfo.brand === 'bhyve' && vmInfo.bootrom
+            if (imageBrand === 'bhyve' && vmInfo.bootrom
                 && !(options.manifest.requirements
                     && options.manifest.requirements.hasOwnProperty('bootrom')))
             {
@@ -3597,7 +3605,7 @@ IMGADM.prototype.createImage = function createImage(options, callback) {
             }
         },
         function removeBhyveQuota(next) {
-            if (vmInfo.brand !== 'bhyve') {
+            if (BHYVE_BRANDS.indexOf(vmInfo.brand) === -1) {
                 next();
                 return;
             }
@@ -3634,9 +3642,7 @@ IMGADM.prototype.createImage = function createImage(options, callback) {
             }
 
             var toSnapshot = [vmInfo.zfs_filesystem];
-            if ((vmInfo.brand === 'kvm' || vmInfo.brand === 'bhyve')
-                && vmInfo.disks) {
-
+            if (HVM_BRANDS.indexOf(vmInfo.brand) !== -1 && vmInfo.disks) {
                 for (var i = 0; i < vmInfo.disks.length; i++) {
                     toSnapshot.push(vmInfo.disks[i].zfs_filesystem);
                 }
@@ -4100,7 +4106,8 @@ IMGADM.prototype.createImage = function createImage(options, callback) {
                     function destroyOne(snap, nextSnapshot) {
                         var re = new RegExp('/disk[0-9]*' + snapname + '$');
 
-                        if (vmInfo.brand === 'bhyve' && snap.match(re)) {
+                        if (BHYVE_BRANDS.indexOf(vmInfo.brand) !== -1
+                            && snap.match(re)) {
                             // For bhyve brand, the disk snapshots will be gone
                             // when the root snapshot is destroyed (because of
                             // the -r) so, we only need to remove the root
