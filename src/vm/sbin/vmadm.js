@@ -491,7 +491,9 @@ function addFakeFields(m)
         && BRAND_OPTIONS[m.brand].features.type) {
 
         // TYPE header is 4 characters, so truncate brand name there too.
-        m.type = BRAND_OPTIONS[m.brand].features.type.substr(0, 4);
+        // A brand that shares another's type can list under its own.
+        m.type = (BRAND_OPTIONS[m.brand].features.list_type
+            || BRAND_OPTIONS[m.brand].features.type).substr(0, 4);
     } else {
         // When we don't know 'type', treat as OS VM
         m.type = 'OS';
