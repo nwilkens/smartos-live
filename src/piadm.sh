@@ -1504,6 +1504,12 @@ enablepool() {
 	# set...
 	zpool set "bootfs=${bootfs}" "${pool}" || \
 		fatal "Cannot set bootfs for $pool"
+	# Keeps zpool status and zpool upgrade to the features the loader reads.
+	if [[ -f /usr/share/zfs/compatibility.d/illumos-loader &&
+	    $(zpool get -Ho value compatibility "$pool") == "off" ]]; then
+		zpool set compatibility=illumos-loader "$pool" || \
+			fatal "Cannot set compatibility for $pool"
+	fi
 	# Reset our view of available bootable pools.
 	getbootable
 
