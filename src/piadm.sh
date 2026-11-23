@@ -753,6 +753,13 @@ list() {
 	done
 }
 
+# The disks (cXtYdZ, no slice) under a pool's vdevs.  "zpool list -P" names
+# them /dev/dsk/cXtYdZsN on OpenZFS and cXtYdZsN on illumos ZFS.
+pool_disks() {
+	zpool list -vHP "$1" | awk '{print $1}' | sed -E -n \
+	    's;^(/dev/dsk/)?(c[0-9]+(t[0-9A-Fa-f]+)?d[0-9]+)([sp][0-9]+)?$;\2;p'
+}
+
 update_boot_sectors() {
 	pool=$1
 	bootfs=$2
@@ -762,8 +769,10 @@ update_boot_sectors() {
 	# alter the generation of boot_devices accordingly.  Generate the
 	# pool's boot devices now, in case we did something hyper-clever for
 	# the pool.  s1 may be created, but not yet PCFS...
-	mapfile -t boot_devices < <(zpool list -vHP "$pool" | \
-		grep -E 'c[0-9]+' | awk '{print $1}' | sed -E 's/s[0-9]+//g')
+	mapfile -t boot_devices < <(pool_disks "$pool")
+	if [[ ${#boot_devices[@]} -eq 0 ]]; then
+		fatal "Found no disks in pool $pool for boot blocks"
+	fi
 
 	# Reality check the pool was created with -B.
 	# First way to do this is to check for the `bootsize` property not
@@ -830,13 +839,14 @@ update_boot_sectors() {
 			# because boot is actually a symlink.
 			# NOTE3: We need to use -F here so we can revert boot
 			# bits if asked.
-			if installboot -F -m -b "/${bootfs}/boot/" \
+			if ibout=$(installboot -F -m -b "/${bootfs}/boot/" \
 				"/${bootfs}/boot/pmbr" \
 				"/${bootfs}/boot/gptzfsboot" \
-				"/dev/rdsk/${a}${suffix}" > /dev/null 2>&1 ; then
+				"/dev/rdsk/${a}${suffix}" 2>&1) ; then
 				some=1
 			else
-				eecho "WARNING: Can't installboot on ${a}${suffix}"
+				eecho "WARNING: Can't installboot on ${a}${suffix}:"
+				eecho "$ibout"
 			fi
 		fi
 	done
@@ -1629,11 +1639,8 @@ bootable() {
 		if zpool list -Ho bootfs "$pool" | grep -q "${pool}/boot" ; then
 			bootable="BIOS"
 			# Check for pcfs partition on pool disks.
-			mapfile -t boot_devices < \
-				<(zpool list -vHP "${pool}" | \
-				grep -E 'c[0-9]+' | awk '{print $1}')
-			for a in "${boot_devices[@]}"; do
-				noslice=$(echo "$a" | sed -E 's/s[0-9]+//g')
+			mapfile -t boot_devices < <(pool_disks "${pool}")
+			for noslice in "${boot_devices[@]}"; do
 				tdir=$(mktemp -d)
 				# Assume that s0 on the physical disk would be
 				# where the EFI System Partition (ESP) lives.
